@@ -129,6 +129,13 @@ type Crawler struct {
 	mu      sync.Mutex
 	visited map[string]struct{}
 
+	// linkChecks caches the outcome of probing a link's reachability, keyed
+	// by its normalized URL, so that a link repeated across many pages (or
+	// one that is both linked-to and separately crawled as its own page) is
+	// only ever requested once per run, no matter how many pages reference
+	// it or how many workers ask concurrently.
+	linkChecks map[string]*linkCheckEntry
+
 	// limiter paces every outgoing HTTP request (first attempts and
 	// retries alike) so that, no matter how many workers are running,
 	// requests never go out faster than one per opts.Delay. nil means no
@@ -136,11 +143,21 @@ type Crawler struct {
 	limiter *time.Ticker
 }
 
+// linkCheckEntry memoizes the result of probing one URL. once ensures the
+// probe runs exactly once even if several workers race to check the same
+// link at the same time; every caller either runs the probe or waits for
+// the one that is already running, then reads its result.
+type linkCheckEntry struct {
+	once   sync.Once
+	result *BrokenLink
+}
+
 func NewCrawler(opts Options) *Crawler {
 	c := &Crawler{
-		client:  opts.Client(),
-		opts:    opts,
-		visited: make(map[string]struct{}),
+		client:     opts.Client(),
+		opts:       opts,
+		visited:    make(map[string]struct{}),
+		linkChecks: make(map[string]*linkCheckEntry),
 	}
 	if opts.Delay > 0 {
 		c.limiter = time.NewTicker(opts.Delay)
@@ -326,19 +343,41 @@ func isCheckableScheme(link *url.URL) bool {
 // checkLink probes a single link's target to see whether it is reachable.
 // It returns nil when the link is fine (2xx/3xx), and a *BrokenLink when the
 // server answered with a 4xx/5xx status or the request failed outright.
+// Results are cached per run: a link referenced from multiple pages, or one
+// that is both linked-to and crawled as its own page, is only probed once.
 func (c *Crawler) checkLink(ctx context.Context, link *url.URL) *BrokenLink {
-	if err := c.throttle(ctx); err != nil {
-		return nil
-	}
+	entry := c.linkCheckEntry(link)
 
-	status, err := c.probe(ctx, link.String())
-	if err != nil {
-		return &BrokenLink{URL: link.String(), Error: err.Error()}
+	entry.once.Do(func() {
+		if err := c.throttle(ctx); err != nil {
+			return
+		}
+		status, err := c.probe(ctx, link.String())
+		switch {
+		case err != nil:
+			entry.result = &BrokenLink{URL: link.String(), Error: err.Error()}
+		case status >= 400:
+			entry.result = &BrokenLink{URL: link.String(), StatusCode: status}
+		}
+	})
+
+	return entry.result
+}
+
+// linkCheckEntry returns the cache entry for link's normalized URL,
+// creating it on first use.
+func (c *Crawler) linkCheckEntry(link *url.URL) *linkCheckEntry {
+	key := normalizeURL(link.String())
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	entry, ok := c.linkChecks[key]
+	if !ok {
+		entry = &linkCheckEntry{}
+		c.linkChecks[key] = entry
 	}
-	if status >= 400 {
-		return &BrokenLink{URL: link.String(), StatusCode: status}
-	}
-	return nil
+	return entry
 }
 
 // probe checks whether rawURL is reachable, without caring about the body.

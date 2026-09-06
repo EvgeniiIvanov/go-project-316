@@ -366,6 +366,42 @@ func TestCrawl_BrokenLinks_UsesHeadAndFallsBackToGet(t *testing.T) {
 	require.Empty(t, report.Pages[0].BrokenLinks)
 }
 
+func TestCrawl_BrokenLinks_SharedLinkIsCheckedOnlyOnce(t *testing.T) {
+	site := newFakeSite()
+	site.handle("/", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusOK, fmt.Sprintf(htmlTemplate, `
+			<a href="/page-a">A</a>
+			<a href="http://cdn.test/asset.js">Shared external asset</a>
+		`)), nil
+	})
+	site.handle("/page-a", func(r *http.Request) (*http.Response, error) {
+		// Same external link also appears on this second, same-host page.
+		return newResponse(http.StatusOK, fmt.Sprintf(htmlTemplate, `<a href="http://cdn.test/asset.js">Shared external asset</a>`)), nil
+	})
+	site.handle("/asset.js", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusNotFound, ""), nil
+	})
+
+	opts := testOptions("http://fake.test/", site.client())
+	opts.Depth = 1
+
+	report, err := NewCrawler(opts).Run(context.Background())
+	require.NoError(t, err)
+
+	byURL := make(map[string]Page)
+	for _, p := range report.Pages {
+		byURL[p.URL] = p
+	}
+	require.Len(t, byURL["http://fake.test/"].BrokenLinks, 1)
+	require.Len(t, byURL["http://fake.test/page-a"].BrokenLinks, 1)
+
+	// The external asset is never crawled as its own page (different host),
+	// and despite being referenced from two pages, it must only be
+	// requested once for the whole run: the second reference is served
+	// from the per-run cache.
+	require.Equal(t, 1, site.callCount("http://cdn.test/asset.js"))
+}
+
 func TestCrawl_Timeout(t *testing.T) {
 	site := newFakeSite()
 	site.handle("/", func(r *http.Request) (*http.Response, error) {
