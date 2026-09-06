@@ -82,6 +82,7 @@ func newResponse(status int, body string) *http.Response {
 type fakeSite struct {
 	mu       sync.Mutex
 	calls    map[string]int
+	times    []time.Time
 	handlers map[string]func(*http.Request) (*http.Response, error)
 }
 
@@ -99,6 +100,7 @@ func (s *fakeSite) handle(path string, fn func(*http.Request) (*http.Response, e
 func (s *fakeSite) RoundTrip(r *http.Request) (*http.Response, error) {
 	s.mu.Lock()
 	s.calls[r.URL.String()]++
+	s.times = append(s.times, time.Now())
 	s.mu.Unlock()
 
 	fn, ok := s.handlers[r.URL.Path]
@@ -106,6 +108,17 @@ func (s *fakeSite) RoundTrip(r *http.Request) (*http.Response, error) {
 		return newResponse(http.StatusNotFound, ""), nil
 	}
 	return fn(r)
+}
+
+// requestTimes returns the wall-clock time at which each request was
+// received, in the order RoundTrip observed them. Used to verify global
+// pacing (Delay/RPS) across all workers.
+func (s *fakeSite) requestTimes() []time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]time.Time, len(s.times))
+	copy(out, s.times)
+	return out
 }
 
 func (s *fakeSite) callCount(rawURL string) int {
@@ -518,6 +531,177 @@ func TestAnalyze_ReturnsPartialReportOnContextCancellation(t *testing.T) {
 	require.Len(t, root.BrokenLinks, 1)
 	require.Equal(t, "http://fake.test/slow", root.BrokenLinks[0].URL)
 	require.NotEmpty(t, root.BrokenLinks[0].Error)
+}
+
+func TestOptionsInterval(t *testing.T) {
+	cases := []struct {
+		name  string
+		delay time.Duration
+		rps   int
+		want  time.Duration
+	}{
+		{"neither set means no throttling", 0, 0, 0},
+		{"delay only", 200 * time.Millisecond, 0, 200 * time.Millisecond},
+		{"rps only", 0, 5, 200 * time.Millisecond},
+		{"rps takes priority over delay when both set", time.Second, 5, 200 * time.Millisecond},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := Options{Delay: tc.delay, RPS: tc.rps}
+			require.Equal(t, tc.want, opts.interval())
+		})
+	}
+}
+
+func TestOptionsValidate_NegativeRPS(t *testing.T) {
+	opts := Options{URL: "http://x", Concurrency: 1, RPS: -1}
+	require.EqualError(t, opts.Validate(), "rps cannot be negative")
+}
+
+// linksToPages builds an HTML body linking to n same-host pages, each of
+// which serves a trivial 200 response with no further links, so the crawl
+// makes exactly n+1 requests (root + n children).
+func linksToPages(n int) (string, []string) {
+	var sb strings.Builder
+	paths := make([]string, n)
+	for i := range n {
+		p := fmt.Sprintf("/page%d", i)
+		paths[i] = p
+		fmt.Fprintf(&sb, `<a href="%s">p</a>`, p)
+	}
+	return sb.String(), paths
+}
+
+func TestCrawl_RPSThrottlesRequestsGlobally(t *testing.T) {
+	const n = 4
+	links, paths := linksToPages(n)
+	site := newFakeSite()
+	site.handle("/", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusOK, fmt.Sprintf(htmlTemplate, links)), nil
+	})
+	for _, p := range paths {
+		site.handle(p, func(r *http.Request) (*http.Response, error) {
+			return newResponse(http.StatusOK, fmt.Sprintf(htmlTemplate, "")), nil
+		})
+	}
+
+	opts := testOptions("http://fake.test/", site.client())
+	opts.Depth = 1
+	opts.Concurrency = n     // enough workers that, unthrottled, all children fire near-simultaneously
+	opts.RPS = 20            // 50ms minimum spacing, global across all workers
+	opts.Delay = time.Second // must be ignored: RPS takes priority
+
+	report, err := NewCrawler(opts).Run(context.Background())
+	require.NoError(t, err)
+	require.Len(t, report.Pages, n+1)
+
+	times := site.requestTimes()
+	// Each child link is both crawled as its own page and probed by the
+	// broken-link checker, so total requests are root(1) + 2*n children.
+	require.Len(t, times, 1+2*n)
+	minInterval := time.Second / time.Duration(opts.RPS)
+	// Allow a small tolerance for scheduler/timer jitter; the point of this
+	// test is to catch requests firing without any pacing at all (which
+	// would show gaps close to 0), not to enforce sub-millisecond ticker
+	// precision.
+	const tolerance = 5 * time.Millisecond
+	for i := 1; i < len(times); i++ {
+		gap := times[i].Sub(times[i-1])
+		require.GreaterOrEqualf(t, gap, minInterval-tolerance, "gap between request %d and %d was %v, want >= %v", i-1, i, gap, minInterval)
+	}
+}
+
+func TestCrawl_DelayThrottlesRequestsGlobally(t *testing.T) {
+	const n = 3
+	links, paths := linksToPages(n)
+	site := newFakeSite()
+	site.handle("/", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusOK, fmt.Sprintf(htmlTemplate, links)), nil
+	})
+	for _, p := range paths {
+		site.handle(p, func(r *http.Request) (*http.Response, error) {
+			return newResponse(http.StatusOK, fmt.Sprintf(htmlTemplate, "")), nil
+		})
+	}
+
+	opts := testOptions("http://fake.test/", site.client())
+	opts.Depth = 1
+	opts.Concurrency = n
+	opts.Delay = 40 * time.Millisecond
+
+	report, err := NewCrawler(opts).Run(context.Background())
+	require.NoError(t, err)
+	require.Len(t, report.Pages, n+1)
+
+	times := site.requestTimes()
+	// Each child link is both crawled as its own page and probed by the
+	// broken-link checker, so total requests are root(1) + 2*n children.
+	require.Len(t, times, 1+2*n)
+	const tolerance = 5 * time.Millisecond
+	for i := 1; i < len(times); i++ {
+		gap := times[i].Sub(times[i-1])
+		require.GreaterOrEqualf(t, gap, opts.Delay-tolerance, "gap between request %d and %d was %v, want >= %v", i-1, i, gap, opts.Delay)
+	}
+}
+
+func TestCrawl_NoLimitIsNotArtificiallySlowed(t *testing.T) {
+	const n = 20
+	links, paths := linksToPages(n)
+	site := newFakeSite()
+	site.handle("/", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusOK, fmt.Sprintf(htmlTemplate, links)), nil
+	})
+	for _, p := range paths {
+		site.handle(p, func(r *http.Request) (*http.Response, error) {
+			return newResponse(http.StatusOK, fmt.Sprintf(htmlTemplate, "")), nil
+		})
+	}
+
+	opts := testOptions("http://fake.test/", site.client())
+	opts.Depth = 1
+	opts.Concurrency = n
+	opts.Delay = 0
+	opts.RPS = 0
+
+	start := time.Now()
+	report, err := NewCrawler(opts).Run(context.Background())
+	elapsed := time.Since(start)
+	require.NoError(t, err)
+	require.Len(t, report.Pages, n+1)
+	// With no rate limit, n+1 in-process requests across n workers should
+	// complete almost instantly. A generous bound well below what any
+	// configured Delay/RPS in the other tests would allow catches the case
+	// where throttling is accidentally applied when both limits are zero.
+	require.Less(t, elapsed, 200*time.Millisecond)
+}
+
+func TestCrawl_ContextCancellationStopsThrottleWaitImmediately(t *testing.T) {
+	site := newFakeSite()
+	site.handle("/", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusOK, fmt.Sprintf(htmlTemplate, "")), nil
+	})
+
+	opts := testOptions("http://fake.test/", site.client())
+	opts.Delay = time.Hour // effectively infinite; only cancellation should unblock throttle
+
+	c := NewCrawler(opts)
+	// The ticker's first tick doesn't fire until opts.Delay has elapsed, so
+	// this throttle call is guaranteed to block on it (or on ctx.Done())
+	// rather than returning immediately.
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- c.throttle(ctx)
+	}()
+
+	cancel()
+
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(time.Second):
+		t.Fatal("throttle did not return promptly after context cancellation")
+	}
 }
 
 func TestCrawl_Timeout(t *testing.T) {

@@ -31,10 +31,15 @@ func main() {
 				Usage: "number of retries for a failed request",
 				Value: crawler.DefaultRetries,
 			},
-			&cli.IntFlag{
+			&cli.DurationFlag{
 				Name:  "delay",
-				Usage: "delay in seconds between requests",
-				Value: int(crawler.DefaultDelay.Seconds()),
+				Usage: "fixed delay between requests, e.g. 200ms, 1s (global across all workers; ignored if --rps is set)",
+				Value: crawler.DefaultDelay,
+			},
+			&cli.IntFlag{
+				Name:  "rps",
+				Usage: "target requests per second, global across all workers; takes priority over --delay when set (0 disables)",
+				Value: crawler.DefaultRPS,
 			},
 			&cli.IntFlag{
 				Name:  "timeout",
@@ -66,7 +71,8 @@ func main() {
 			opts := crawler.NewOptions(url)
 			opts.Depth = cmd.Int("depth")
 			opts.Retries = cmd.Int("retries")
-			opts.Delay = time.Duration(cmd.Int("delay")) * time.Second
+			opts.Delay = cmd.Duration("delay")
+			opts.RPS = cmd.Int("rps")
 			opts.Timeout = time.Duration(cmd.Int("timeout")) * time.Second
 			opts.UserAgent = cmd.String("user-agent")
 			opts.Concurrency = cmd.Int("concurrency")
