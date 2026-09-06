@@ -82,7 +82,10 @@ func main() {
 			if data == nil {
 				return cli.Exit(fmt.Sprintf("error: %v", err), 1)
 			}
-			fmt.Print(string(data))
+			// Print the report JSON verbatim, with nothing before or after
+			// it besides the single trailing newline that terminals and
+			// line-oriented tools (e.g. diff, cat) expect.
+			fmt.Println(string(data))
 			if err != nil {
 				return cli.Exit(fmt.Sprintf("error: %v", err), 1)
 			}

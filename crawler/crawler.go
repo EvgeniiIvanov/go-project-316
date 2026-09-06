@@ -122,15 +122,19 @@ type Report struct {
 }
 
 // Page describes the outcome of fetching a single URL during the crawl.
+// Every field is always present in the JSON report, even when it holds a
+// zero value (empty string, empty array, etc): consumers should never need
+// to handle a missing key, only an empty one.
 type Page struct {
-	URL         string       `json:"url"`
-	Depth       int          `json:"depth"`
-	HTTPStatus  int          `json:"http_status"`
-	Status      string       `json:"status"`
-	Error       string       `json:"error"`
-	BrokenLinks []BrokenLink `json:"broken_links,omitempty"`
-	SEO         SEO          `json:"seo"`
-	Assets      []Asset      `json:"assets"`
+	URL          string       `json:"url"`
+	Depth        int          `json:"depth"`
+	HTTPStatus   int          `json:"http_status"`
+	Status       string       `json:"status"`
+	Error        string       `json:"error"`
+	SEO          SEO          `json:"seo"`
+	BrokenLinks  []BrokenLink `json:"broken_links"`
+	Assets       []Asset      `json:"assets"`
+	DiscoveredAt time.Time    `json:"discovered_at"`
 }
 
 // Asset describes a single static resource (image, script, or stylesheet)
@@ -172,8 +176,8 @@ type SEO struct {
 // or Error is set.
 type BrokenLink struct {
 	URL        string `json:"url"`
-	StatusCode int    `json:"status_code,omitempty"`
-	Error      string `json:"error,omitempty"`
+	StatusCode int    `json:"status_code"`
+	Error      string `json:"error"`
 }
 
 type crawlJob struct {
@@ -382,9 +386,11 @@ func (run *crawlRun) enqueue(ctx context.Context, job crawlJob) {
 
 func (c *Crawler) processPage(ctx context.Context, job crawlJob) (Page, []*url.URL) {
 	page := Page{
-		URL:    job.url.String(),
-		Depth:  job.depth,
-		Assets: []Asset{},
+		URL:          job.url.String(),
+		Depth:        job.depth,
+		DiscoveredAt: time.Now().UTC().Truncate(time.Second),
+		BrokenLinks:  []BrokenLink{},
+		Assets:       []Asset{},
 	}
 
 	body, status, err := c.fetch(ctx, job.url.String())

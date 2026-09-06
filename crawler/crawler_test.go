@@ -1,6 +1,7 @@
 package crawler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -66,6 +67,123 @@ func TestNewOptionsDefaults(t *testing.T) {
 	require.Equal(t, DefaultUserAgent, opts.UserAgent)
 	require.Equal(t, DefaultConcurrency, opts.Concurrency)
 	require.Equal(t, DefaultIndentJSON, opts.IndentJSON)
+}
+
+// referenceReportJSON is Hexlet's canonical example report: every field
+// that must always be present in the JSON output, populated with a
+// non-default value (or the empty value that still must appear).
+const referenceReportJSON = `{
+  "root_url": "https://example.com",
+  "depth": 1,
+  "generated_at": "2024-06-01T12:34:56Z",
+  "pages": [
+    {
+      "url": "https://example.com",
+      "depth": 0,
+      "http_status": 200,
+      "status": "ok",
+      "error": "",
+      "seo": {
+        "has_title": true,
+        "title": "Example title",
+        "has_description": true,
+        "description": "Example description",
+        "has_h1": true
+      },
+      "broken_links": [
+        {
+          "url": "https://example.com/missing",
+          "status_code": 404,
+          "error": "Not Found"
+        }
+      ],
+      "assets": [
+        {
+          "url": "https://example.com/static/logo.png",
+          "type": "image",
+          "status_code": 200,
+          "size_bytes": 12345,
+          "error": ""
+        }
+      ],
+      "discovered_at": "2024-06-01T12:34:56Z"
+    }
+  ]
+}`
+
+// referenceReport builds the Report value that referenceReportJSON encodes.
+func referenceReport() Report {
+	ts := time.Date(2024, 6, 1, 12, 34, 56, 0, time.UTC)
+	return Report{
+		RootURL:     "https://example.com",
+		Depth:       1,
+		GeneratedAt: ts,
+		Pages: []Page{
+			{
+				URL:        "https://example.com",
+				Depth:      0,
+				HTTPStatus: http.StatusOK,
+				Status:     "ok",
+				Error:      "",
+				SEO: SEO{
+					HasTitle:       true,
+					Title:          "Example title",
+					HasDescription: true,
+					Description:    "Example description",
+					HasH1:          true,
+				},
+				BrokenLinks: []BrokenLink{
+					{URL: "https://example.com/missing", StatusCode: http.StatusNotFound, Error: "Not Found"},
+				},
+				Assets: []Asset{
+					{URL: "https://example.com/static/logo.png", Type: AssetTypeImage, StatusCode: http.StatusOK, SizeBytes: 12345, Error: ""},
+				},
+				DiscoveredAt: ts,
+			},
+		},
+	}
+}
+
+// compactJSON removes insignificant whitespace, so two JSON documents that
+// differ only in formatting compare equal byte-for-byte, including key
+// order (json.Compact does not reorder keys, it only strips whitespace).
+func compactJSON(t *testing.T, data []byte) string {
+	t.Helper()
+	var buf bytes.Buffer
+	require.NoError(t, json.Compact(&buf, data))
+	return buf.String()
+}
+
+// TestReport_JSONMatchesReferenceSchema compares the library's JSON output,
+// byte-for-byte after whitespace normalization, against Hexlet's reference
+// report: every key, its position, and its value (including empty strings
+// like "error": "") must match exactly.
+func TestReport_JSONMatchesReferenceSchema(t *testing.T) {
+	report := referenceReport()
+	want := compactJSON(t, []byte(referenceReportJSON))
+
+	compact, err := json.Marshal(report)
+	require.NoError(t, err)
+	require.Equal(t, want, string(compact))
+}
+
+// TestReport_IndentJSONOnlyAffectsFormatting ensures IndentJSON changes
+// nothing but whitespace: once both outputs are compacted, they must be
+// identical, including key order and every value.
+func TestReport_IndentJSONOnlyAffectsFormatting(t *testing.T) {
+	report := referenceReport()
+
+	compact, err := json.Marshal(report)
+	require.NoError(t, err)
+
+	indented, err := json.MarshalIndent(report, "", "  ")
+	require.NoError(t, err)
+	// Sanity check that indenting actually changed the formatting, so this
+	// test cannot pass vacuously if MarshalIndent silently behaved like
+	// Marshal.
+	require.NotEqual(t, string(compact), string(indented))
+
+	require.Equal(t, compactJSON(t, compact), compactJSON(t, indented))
 }
 
 func newResponse(status int, body string) *http.Response {
