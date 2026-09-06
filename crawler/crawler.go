@@ -30,6 +30,13 @@ const (
 	DefaultIndentJSON  = true
 )
 
+// retryBackoff is the fixed pause observed between a failed attempt and the
+// next retry of the same request. It is independent of, and in addition to,
+// any global Delay/RPS pacing: it exists so that retries of one request
+// never fire back-to-back in a burst, even when no global rate limit is
+// configured.
+const retryBackoff = 100 * time.Millisecond
+
 type Options struct {
 	URL         string
 	Depth       int
@@ -211,6 +218,35 @@ func (c *Crawler) throttle(ctx context.Context) error {
 	}
 }
 
+// retryWait pauses for retryBackoff before the next retry attempt, returning
+// ctx.Err() immediately if ctx is canceled or times out before the wait
+// completes, so a canceled crawl never sits through a retry backoff.
+func (c *Crawler) retryWait(ctx context.Context) error {
+	timer := time.NewTimer(retryBackoff)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// isRetryableStatus reports whether a request attempt represents a transient
+// failure worth retrying: a network-level error (no response at all), a 429
+// Too Many Requests, or any 5xx server error. Any other outcome, including a
+// definitive 4xx status such as 404, is treated as permanent and is not
+// retried, regardless of how many retries remain.
+func isRetryableStatus(status int, err error) bool {
+	if status == http.StatusTooManyRequests || status >= http.StatusInternalServerError {
+		return true
+	}
+	if status != 0 {
+		return false
+	}
+	return err != nil
+}
+
 func (c *Crawler) visitedOrMark(u *url.URL) bool {
 	key := normalizeURL(u.String())
 	c.mu.Lock()
@@ -382,10 +418,7 @@ func (c *Crawler) checkLink(ctx context.Context, link *url.URL) *BrokenLink {
 	entry := c.linkCheckEntry(link)
 
 	entry.once.Do(func() {
-		if err := c.throttle(ctx); err != nil {
-			return
-		}
-		status, err := c.probe(ctx, link.String())
+		status, err := c.probeWithRetries(ctx, link.String())
 		switch {
 		case err != nil:
 			entry.result = &BrokenLink{URL: link.String(), Error: err.Error()}
@@ -395,6 +428,28 @@ func (c *Crawler) checkLink(ctx context.Context, link *url.URL) *BrokenLink {
 	})
 
 	return entry.result
+}
+
+// probeWithRetries probes rawURL, retrying up to opts.Retries additional
+// times on transient failures (network errors, 429, 5xx) with a fixed,
+// non-zero pause between attempts. The broken-link report reflects the
+// outcome of the last attempt only.
+func (c *Crawler) probeWithRetries(ctx context.Context, rawURL string) (int, error) {
+	var status int
+	var err error
+	for attempt := 0; attempt <= c.opts.Retries; attempt++ {
+		if werr := c.throttle(ctx); werr != nil {
+			return 0, werr
+		}
+		status, err = c.probe(ctx, rawURL)
+		if !isRetryableStatus(status, err) || attempt == c.opts.Retries {
+			return status, err
+		}
+		if werr := c.retryWait(ctx); werr != nil {
+			return status, werr
+		}
+	}
+	return status, err
 }
 
 // linkCheckEntry returns the cache entry for link's normalized URL,
@@ -451,25 +506,28 @@ func (c *Crawler) doProbeRequest(ctx context.Context, method, rawURL string) (in
 	return resp.StatusCode, nil
 }
 
+// fetch performs a GET for rawURL, retrying up to opts.Retries additional
+// times on transient failures (network errors, 429, 5xx) with a fixed,
+// non-zero pause between attempts. The result of the last attempt (success
+// or failure) is what gets returned and, ultimately, reported.
 func (c *Crawler) fetch(ctx context.Context, rawURL string) ([]byte, int, error) {
-	var lastErr error
+	var body []byte
+	var status int
+	var err error
 	for attempt := 0; attempt <= c.opts.Retries; attempt++ {
-		if err := c.throttle(ctx); err != nil {
-			return nil, 0, err
+		if werr := c.throttle(ctx); werr != nil {
+			return nil, 0, werr
 		}
 
-		body, status, err := c.doRequest(ctx, rawURL)
-		if err == nil {
-			return body, status, nil
+		body, status, err = c.doRequest(ctx, rawURL)
+		if !isRetryableStatus(status, err) || attempt == c.opts.Retries {
+			return body, status, err
 		}
-		lastErr = err
-		if status != 0 {
-			// A response was received but had a non-2xx status; that is not
-			// a transient failure worth retrying.
-			return body, status, lastErr
+		if werr := c.retryWait(ctx); werr != nil {
+			return body, status, werr
 		}
 	}
-	return nil, 0, lastErr
+	return body, status, err
 }
 
 // doRequest performs a single GET attempt for rawURL.

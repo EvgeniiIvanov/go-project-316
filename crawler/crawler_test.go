@@ -266,7 +266,7 @@ func TestCrawl_NotFoundStopsImmediately(t *testing.T) {
 	require.Equal(t, 1, site.callCount("http://fake.test/"))
 }
 
-func TestCrawl_ServerErrorStopsImmediately(t *testing.T) {
+func TestCrawl_ServerErrorRetriesThenFails(t *testing.T) {
 	site := newFakeSite()
 	site.handle("/", func(r *http.Request) (*http.Response, error) {
 		return newResponse(http.StatusInternalServerError, ""), nil
@@ -280,7 +280,111 @@ func TestCrawl_ServerErrorStopsImmediately(t *testing.T) {
 	require.Len(t, report.Pages, 1)
 	require.Equal(t, "error", report.Pages[0].Status)
 	require.Equal(t, http.StatusInternalServerError, report.Pages[0].HTTPStatus)
+	// Retries + 1 total attempts: the initial try plus 3 retries, never more.
+	require.Equal(t, opts.Retries+1, site.callCount("http://fake.test/"))
+}
+
+// TestCrawl_RetriesExhausted_TwoFailuresWithRetries2IsAnError covers the
+// spec's explicit example: with --retries=2 and two failures, the final
+// outcome must be an error (attempt 1 fails, retry 1 fails, retry 2
+// exhausts the budget).
+func TestCrawl_RetriesExhausted_TwoFailuresWithRetries2IsAnError(t *testing.T) {
+	site := newFakeSite()
+	site.handle("/", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusServiceUnavailable, ""), nil
+	})
+
+	opts := testOptions("http://fake.test/", site.client())
+	opts.Retries = 2
+
+	report, err := NewCrawler(opts).Run(context.Background())
+	require.NoError(t, err)
+	require.Len(t, report.Pages, 1)
+	require.Equal(t, "error", report.Pages[0].Status)
+	require.Equal(t, http.StatusServiceUnavailable, report.Pages[0].HTTPStatus)
+	require.Equal(t, 3, site.callCount("http://fake.test/"))
+}
+
+// TestCrawl_OneFailureThenSuccessWithRetries2IsOK covers the spec's other
+// explicit example: one failure followed by a successful second attempt
+// counts as success overall.
+func TestCrawl_OneFailureThenSuccessWithRetries2IsOK(t *testing.T) {
+	site := newFakeSite()
+	site.handle("/", func(r *http.Request) (*http.Response, error) {
+		if site.callCount(r.URL.String()) == 1 {
+			return newResponse(http.StatusServiceUnavailable, ""), nil
+		}
+		return newResponse(http.StatusOK, "root"), nil
+	})
+
+	opts := testOptions("http://fake.test/", site.client())
+	opts.Retries = 2
+
+	report, err := NewCrawler(opts).Run(context.Background())
+	require.NoError(t, err)
+	require.Len(t, report.Pages, 1)
+	require.Equal(t, "ok", report.Pages[0].Status)
+	require.Equal(t, 2, site.callCount("http://fake.test/"))
+}
+
+// TestCrawl_NonRetryableStatusStopsImmediately ensures a definitive 4xx
+// (other than 429) is never retried, even when retries are available.
+func TestCrawl_NonRetryableStatusStopsImmediately(t *testing.T) {
+	site := newFakeSite()
+	site.handle("/", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusForbidden, ""), nil
+	})
+
+	opts := testOptions("http://fake.test/", site.client())
+	opts.Retries = 3
+
+	report, err := NewCrawler(opts).Run(context.Background())
+	require.NoError(t, err)
+	require.Len(t, report.Pages, 1)
+	require.Equal(t, "error", report.Pages[0].Status)
+	require.Equal(t, http.StatusForbidden, report.Pages[0].HTTPStatus)
 	require.Equal(t, 1, site.callCount("http://fake.test/"))
+}
+
+// TestCrawl_BrokenLink_ReflectsLastAttemptResult ensures the broken-links
+// report reflects the outcome of the final retry, not the first failure.
+func TestCrawl_BrokenLink_ReflectsLastAttemptResult(t *testing.T) {
+	site := newFakeSite()
+	site.handle("/", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusOK, fmt.Sprintf(htmlTemplate, `<a href="/flaky">Flaky</a>`)), nil
+	})
+	site.handle("/flaky", func(r *http.Request) (*http.Response, error) {
+		if site.callCount(r.URL.String()) == 1 {
+			return newResponse(http.StatusServiceUnavailable, ""), nil
+		}
+		return newResponse(http.StatusOK, "ok"), nil
+	})
+
+	opts := testOptions("http://fake.test/", site.client())
+	opts.Retries = 2
+	opts.Depth = 0 // keep /flaky as a checked link only, not a crawled page
+
+	report, err := NewCrawler(opts).Run(context.Background())
+	require.NoError(t, err)
+	require.Len(t, report.Pages, 1)
+	require.Empty(t, report.Pages[0].BrokenLinks)
+}
+
+// TestCrawl_RetryWaitIsNonZeroAndContextCancellationStopsIt ensures a
+// canceled context aborts a pending retry wait immediately instead of
+// blocking for retryBackoff.
+func TestCrawl_RetryWaitIsNonZeroAndContextCancellationStopsIt(t *testing.T) {
+	c := NewCrawler(testOptions("http://fake.test/", http.DefaultClient))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	start := time.Now()
+	err := c.retryWait(ctx)
+	elapsed := time.Since(start)
+
+	require.ErrorIs(t, err, context.Canceled)
+	require.Less(t, elapsed, retryBackoff)
 }
 
 func TestCrawl_BrokenLinks_OnlyBrokenOnesAreReported(t *testing.T) {
