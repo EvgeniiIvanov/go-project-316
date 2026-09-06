@@ -166,7 +166,10 @@ func TestAnalyze_CrawlsSameHostOnly(t *testing.T) {
 	require.Equal(t, "error", byURL["http://fake.test/missing"].Status)
 	require.Equal(t, http.StatusNotFound, byURL["http://fake.test/missing"].HTTPStatus)
 
-	require.Zero(t, site.callCount("http://external.test/"), "external host must never be requested")
+	// External links are still probed to check whether they are broken, but
+	// they must never turn into a Page of their own (i.e. never crawled).
+	require.Equal(t, 1, site.callCount("http://external.test/"))
+	require.NotContains(t, byURL, "http://external.test/")
 }
 
 func TestAnalyze_DepthZeroFetchesOnlyRoot(t *testing.T) {
@@ -185,7 +188,9 @@ func TestAnalyze_DepthZeroFetchesOnlyRoot(t *testing.T) {
 	require.NoError(t, json.Unmarshal(data, &report))
 	require.Len(t, report.Pages, 1)
 	require.Equal(t, "http://fake.test/", report.Pages[0].URL)
-	require.Zero(t, site.callCount("http://fake.test/about"))
+	// /about is never crawled as its own page (depth exceeded), but it is
+	// still probed once to check whether it is a broken link.
+	require.Equal(t, 1, site.callCount("http://fake.test/about"))
 }
 
 func TestRun_DedupesRepeatedLinks(t *testing.T) {
@@ -207,7 +212,9 @@ func TestRun_DedupesRepeatedLinks(t *testing.T) {
 	report, err := NewCrawler(opts).Run(context.Background())
 	require.NoError(t, err)
 	require.Len(t, report.Pages, 2) // root + /about, deduped
-	require.Equal(t, 1, site.callCount("http://fake.test/about"))
+	// One call from crawling /about as a page, one from probing it as a
+	// link on the root page; the 3 duplicate hrefs must not multiply either.
+	require.Equal(t, 2, site.callCount("http://fake.test/about"))
 }
 
 func TestCrawl_RetriesOnNetworkFailure(t *testing.T) {
@@ -261,6 +268,138 @@ func TestCrawl_ServerErrorStopsImmediately(t *testing.T) {
 	require.Equal(t, "error", report.Pages[0].Status)
 	require.Equal(t, http.StatusInternalServerError, report.Pages[0].HTTPStatus)
 	require.Equal(t, 1, site.callCount("http://fake.test/"))
+}
+
+func TestCrawl_BrokenLinks_OnlyBrokenOnesAreReported(t *testing.T) {
+	site := newFakeSite()
+	site.handle("/", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusOK, fmt.Sprintf(htmlTemplate, `
+			<a href="/ok">Working link</a>
+			<a href="/ghost">Broken link</a>
+		`)), nil
+	})
+	site.handle("/ok", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusOK, "fine"), nil
+	})
+	site.handle("/ghost", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusNotFound, ""), nil
+	})
+
+	opts := testOptions("http://fake.test/", site.client())
+	opts.Depth = 0 // only check links on the root page, do not crawl them
+
+	report, err := NewCrawler(opts).Run(context.Background())
+	require.NoError(t, err)
+	require.Len(t, report.Pages, 1)
+
+	root := report.Pages[0]
+	require.Equal(t, "ok", root.Status)
+	require.Len(t, root.BrokenLinks, 1)
+	require.Equal(t, "http://fake.test/ghost", root.BrokenLinks[0].URL)
+	require.Equal(t, http.StatusNotFound, root.BrokenLinks[0].StatusCode)
+	require.Empty(t, root.BrokenLinks[0].Error)
+}
+
+func TestCrawl_BrokenLinks_NetworkFailureIsReported(t *testing.T) {
+	site := newFakeSite()
+	site.handle("/", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusOK, fmt.Sprintf(htmlTemplate, `<a href="http://unreachable.test/app.js">External</a>`)), nil
+	})
+	site.handle("/app.js", func(r *http.Request) (*http.Response, error) {
+		return nil, errors.New("dial tcp: lookup unreachable.test: no such host")
+	})
+
+	opts := testOptions("http://fake.test/", site.client())
+	opts.Depth = 1
+
+	report, err := NewCrawler(opts).Run(context.Background())
+	require.NoError(t, err)
+	require.Len(t, report.Pages, 1) // external host is checked, but never crawled as a page
+
+	root := report.Pages[0]
+	require.Len(t, root.BrokenLinks, 1)
+	require.Equal(t, "http://unreachable.test/app.js", root.BrokenLinks[0].URL)
+	require.Zero(t, root.BrokenLinks[0].StatusCode)
+	require.Contains(t, root.BrokenLinks[0].Error, "no such host")
+}
+
+func TestCrawl_BrokenLinks_IgnoresUnsupportedSchemesAndEmptyHrefs(t *testing.T) {
+	site := newFakeSite()
+	site.handle("/", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusOK, fmt.Sprintf(htmlTemplate, `
+			<a href="mailto:someone@example.com">Mail</a>
+			<a href="javascript:void(0)">JS</a>
+			<a href="">Empty</a>
+			<a href="/ok">Working link</a>
+		`)), nil
+	})
+	site.handle("/ok", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusOK, "fine"), nil
+	})
+
+	opts := testOptions("http://fake.test/", site.client())
+	opts.Depth = 0
+
+	report, err := NewCrawler(opts).Run(context.Background())
+	require.NoError(t, err)
+	require.Len(t, report.Pages, 1)
+	require.Empty(t, report.Pages[0].BrokenLinks)
+}
+
+func TestCrawl_BrokenLinks_UsesHeadAndFallsBackToGet(t *testing.T) {
+	site := newFakeSite()
+	site.handle("/", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusOK, fmt.Sprintf(htmlTemplate, `<a href="/no-head">No HEAD support</a>`)), nil
+	})
+	site.handle("/no-head", func(r *http.Request) (*http.Response, error) {
+		if r.Method == http.MethodHead {
+			return newResponse(http.StatusMethodNotAllowed, ""), nil
+		}
+		return newResponse(http.StatusOK, "fine via GET"), nil
+	})
+
+	opts := testOptions("http://fake.test/", site.client())
+	opts.Depth = 0
+
+	report, err := NewCrawler(opts).Run(context.Background())
+	require.NoError(t, err)
+	require.Empty(t, report.Pages[0].BrokenLinks)
+}
+
+func TestCrawl_BrokenLinks_SharedLinkIsCheckedOnlyOnce(t *testing.T) {
+	site := newFakeSite()
+	site.handle("/", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusOK, fmt.Sprintf(htmlTemplate, `
+			<a href="/page-a">A</a>
+			<a href="http://cdn.test/asset.js">Shared external asset</a>
+		`)), nil
+	})
+	site.handle("/page-a", func(r *http.Request) (*http.Response, error) {
+		// Same external link also appears on this second, same-host page.
+		return newResponse(http.StatusOK, fmt.Sprintf(htmlTemplate, `<a href="http://cdn.test/asset.js">Shared external asset</a>`)), nil
+	})
+	site.handle("/asset.js", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusNotFound, ""), nil
+	})
+
+	opts := testOptions("http://fake.test/", site.client())
+	opts.Depth = 1
+
+	report, err := NewCrawler(opts).Run(context.Background())
+	require.NoError(t, err)
+
+	byURL := make(map[string]Page)
+	for _, p := range report.Pages {
+		byURL[p.URL] = p
+	}
+	require.Len(t, byURL["http://fake.test/"].BrokenLinks, 1)
+	require.Len(t, byURL["http://fake.test/page-a"].BrokenLinks, 1)
+
+	// The external asset is never crawled as its own page (different host),
+	// and despite being referenced from two pages, it must only be
+	// requested once for the whole run: the second reference is served
+	// from the per-run cache.
+	require.Equal(t, 1, site.callCount("http://cdn.test/asset.js"))
 }
 
 func TestCrawl_Timeout(t *testing.T) {
