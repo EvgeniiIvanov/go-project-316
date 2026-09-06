@@ -98,11 +98,22 @@ type Report struct {
 
 // Page describes the outcome of fetching a single URL during the crawl.
 type Page struct {
+	URL         string       `json:"url"`
+	Depth       int          `json:"depth"`
+	HTTPStatus  int          `json:"http_status"`
+	Status      string       `json:"status"`
+	Error       string       `json:"error"`
+	BrokenLinks []BrokenLink `json:"broken_links,omitempty"`
+}
+
+// BrokenLink describes a link found on a page whose target could not be
+// reached: either the server answered with a 4xx/5xx status, or the request
+// failed outright (network error, timeout, etc). Exactly one of StatusCode
+// or Error is set.
+type BrokenLink struct {
 	URL        string `json:"url"`
-	Depth      int    `json:"depth"`
-	HTTPStatus int    `json:"http_status"`
-	Status     string `json:"status"`
-	Error      string `json:"error"`
+	StatusCode int    `json:"status_code,omitempty"`
+	Error      string `json:"error,omitempty"`
 }
 
 type crawlJob struct {
@@ -265,13 +276,107 @@ func (c *Crawler) processPage(ctx context.Context, job crawlJob) (Page, []*url.U
 	page.Status = "ok"
 
 	var links []*url.URL
-	for _, link := range extractLinks(job.url, body) {
-		if !strings.EqualFold(link.Host, c.root.Host) {
+	for _, link := range dedupeLinks(extractLinks(job.url, body)) {
+		if !isCheckableScheme(link) {
 			continue
 		}
-		links = append(links, link)
+		if strings.EqualFold(link.Host, c.root.Host) {
+			links = append(links, link)
+		}
+		if ctx.Err() != nil {
+			continue
+		}
+		if broken := c.checkLink(ctx, link); broken != nil {
+			page.BrokenLinks = append(page.BrokenLinks, *broken)
+		}
 	}
 	return page, links
+}
+
+// dedupeLinks removes repeated hrefs (e.g. the same link appearing several
+// times on one page), preserving first-seen order, so neither the crawl
+// queue nor the broken-links report gets duplicate entries for one page.
+func dedupeLinks(links []*url.URL) []*url.URL {
+	seen := make(map[string]struct{}, len(links))
+	unique := links[:0]
+	for _, link := range links {
+		key := normalizeURL(link.String())
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		unique = append(unique, link)
+	}
+	return unique
+}
+
+// isCheckableScheme reports whether link is something an HTTP client can
+// actually request. Schemes like mailto:, tel:, or javascript: (and links
+// left without a scheme after resolution) are not broken-link candidates,
+// they were never going to be fetched in the first place.
+func isCheckableScheme(link *url.URL) bool {
+	switch strings.ToLower(link.Scheme) {
+	case "http", "https":
+		return true
+	default:
+		return false
+	}
+}
+
+// checkLink probes a single link's target to see whether it is reachable.
+// It returns nil when the link is fine (2xx/3xx), and a *BrokenLink when the
+// server answered with a 4xx/5xx status or the request failed outright.
+func (c *Crawler) checkLink(ctx context.Context, link *url.URL) *BrokenLink {
+	if err := c.throttle(ctx); err != nil {
+		return nil
+	}
+
+	status, err := c.probe(ctx, link.String())
+	if err != nil {
+		return &BrokenLink{URL: link.String(), Error: err.Error()}
+	}
+	if status >= 400 {
+		return &BrokenLink{URL: link.String(), StatusCode: status}
+	}
+	return nil
+}
+
+// probe checks whether rawURL is reachable, without caring about the body.
+// It prefers HEAD, since it exists purely to check reachability, but falls
+// back to GET when the server doesn't support HEAD (405/501): the result
+// reported to callers only depends on the final status, not the method used
+// to obtain it.
+func (c *Crawler) probe(ctx context.Context, rawURL string) (int, error) {
+	reqCtx, cancel := context.WithTimeout(ctx, c.opts.Timeout)
+	defer cancel()
+
+	status, err := c.doProbeRequest(reqCtx, http.MethodHead, rawURL)
+	if err != nil {
+		return 0, err
+	}
+	if status == http.StatusMethodNotAllowed || status == http.StatusNotImplemented {
+		return c.doProbeRequest(reqCtx, http.MethodGet, rawURL)
+	}
+	return status, nil
+}
+
+func (c *Crawler) doProbeRequest(ctx context.Context, method, rawURL string) (int, error) {
+	req, err := http.NewRequestWithContext(ctx, method, rawURL, nil)
+	if err != nil {
+		return 0, err
+	}
+	if c.opts.UserAgent != "" {
+		req.Header.Set("User-Agent", c.opts.UserAgent)
+	}
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	return resp.StatusCode, nil
 }
 
 func (c *Crawler) fetch(ctx context.Context, rawURL string) ([]byte, int, error) {
