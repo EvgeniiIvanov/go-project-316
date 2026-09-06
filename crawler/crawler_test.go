@@ -76,6 +76,17 @@ func newResponse(status int, body string) *http.Response {
 	}
 }
 
+// newResponseWithContentLength builds a response the same way newResponse
+// does, but also sets ContentLength: since fakeSite hands *http.Response
+// values back directly (bypassing the real transport's header parsing),
+// tests that care about Content-Length handling must set this field
+// themselves. Pass -1 to simulate a response with no Content-Length header.
+func newResponseWithContentLength(status int, body string, contentLength int64) *http.Response {
+	resp := newResponse(status, body)
+	resp.ContentLength = contentLength
+	return resp
+}
+
 // fakeSite is an in-process, network-free stand-in for a website: it answers
 // http.Client requests directly via RoundTrip, routing by URL path, and
 // records how many times each URL was requested.
@@ -585,6 +596,163 @@ func TestCrawl_SEO_DecodesHTMLEntities(t *testing.T) {
 	seo := report.Pages[0].SEO
 	require.Equal(t, "Fish & Chips", seo.Title)
 	require.Equal(t, "Salt & vinegar included", seo.Description)
+}
+
+func TestCrawl_Assets_ImageScriptAndStyleAreReported(t *testing.T) {
+	site := newFakeSite()
+	site.handle("/", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusOK, `<html><head>
+			<link rel="stylesheet" href="/style.css">
+		</head><body>
+			<img src="/logo.png">
+			<script src="/app.js"></script>
+		</body></html>`), nil
+	})
+	site.handle("/logo.png", func(r *http.Request) (*http.Response, error) {
+		return newResponseWithContentLength(http.StatusOK, "PNGDATA", 7), nil
+	})
+	site.handle("/app.js", func(r *http.Request) (*http.Response, error) {
+		return newResponseWithContentLength(http.StatusOK, "console.log(1)", 15), nil
+	})
+	site.handle("/style.css", func(r *http.Request) (*http.Response, error) {
+		return newResponseWithContentLength(http.StatusOK, "body{}", 6), nil
+	})
+
+	opts := testOptions("http://fake.test/", site.client())
+	opts.Depth = 0
+
+	report, err := NewCrawler(opts).Run(context.Background())
+	require.NoError(t, err)
+	require.Len(t, report.Pages, 1)
+
+	assets := report.Pages[0].Assets
+	require.Len(t, assets, 3)
+
+	byType := make(map[string]Asset)
+	for _, a := range assets {
+		byType[a.Type] = a
+	}
+
+	img := byType[AssetTypeImage]
+	require.Equal(t, "http://fake.test/logo.png", img.URL)
+	require.Equal(t, http.StatusOK, img.StatusCode)
+	require.Equal(t, int64(7), img.SizeBytes)
+	require.Empty(t, img.Error)
+
+	script := byType[AssetTypeScript]
+	require.Equal(t, "http://fake.test/app.js", script.URL)
+	require.Equal(t, int64(15), script.SizeBytes)
+
+	style := byType[AssetTypeStyle]
+	require.Equal(t, "http://fake.test/style.css", style.URL)
+	require.Equal(t, int64(6), style.SizeBytes)
+}
+
+func TestCrawl_Assets_MissingContentLengthFallsBackToBodySize(t *testing.T) {
+	site := newFakeSite()
+	site.handle("/", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusOK, `<img src="/logo.png">`), nil
+	})
+	site.handle("/logo.png", func(r *http.Request) (*http.Response, error) {
+		// No Content-Length header: ContentLength defaults to -1, as it
+		// would for a chunked or otherwise length-less real response.
+		return newResponseWithContentLength(http.StatusOK, "PNGDATA", -1), nil
+	})
+
+	opts := testOptions("http://fake.test/", site.client())
+	opts.Depth = 0
+
+	report, err := NewCrawler(opts).Run(context.Background())
+	require.NoError(t, err)
+	require.Len(t, report.Pages, 1)
+	require.Len(t, report.Pages[0].Assets, 1)
+
+	asset := report.Pages[0].Assets[0]
+	require.Equal(t, int64(len("PNGDATA")), asset.SizeBytes)
+	require.Empty(t, asset.Error)
+}
+
+func TestCrawl_Assets_ErrorStatusIsReportedWithMessage(t *testing.T) {
+	site := newFakeSite()
+	site.handle("/", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusOK, `<img src="/missing.png">`), nil
+	})
+	site.handle("/missing.png", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusNotFound, ""), nil
+	})
+
+	opts := testOptions("http://fake.test/", site.client())
+	opts.Depth = 0
+
+	report, err := NewCrawler(opts).Run(context.Background())
+	require.NoError(t, err)
+	require.Len(t, report.Pages, 1)
+	require.Len(t, report.Pages[0].Assets, 1)
+
+	asset := report.Pages[0].Assets[0]
+	require.Equal(t, http.StatusNotFound, asset.StatusCode)
+	require.Equal(t, int64(0), asset.SizeBytes)
+	require.NotEmpty(t, asset.Error)
+}
+
+func TestCrawl_Assets_NetworkFailureIsReported(t *testing.T) {
+	site := newFakeSite()
+	site.handle("/", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusOK, `<img src="/logo.png">`), nil
+	})
+	site.handle("/logo.png", func(r *http.Request) (*http.Response, error) {
+		return nil, errors.New("connection refused")
+	})
+
+	opts := testOptions("http://fake.test/", site.client())
+	opts.Depth = 0
+
+	report, err := NewCrawler(opts).Run(context.Background())
+	require.NoError(t, err)
+	require.Len(t, report.Pages, 1)
+	require.Len(t, report.Pages[0].Assets, 1)
+
+	asset := report.Pages[0].Assets[0]
+	require.Equal(t, 0, asset.StatusCode)
+	require.Equal(t, int64(0), asset.SizeBytes)
+	require.NotEmpty(t, asset.Error)
+}
+
+// TestCrawl_Assets_SharedAssetIsFetchedOnlyOnce ensures an asset referenced
+// from multiple pages is fetched once and yields identical data everywhere
+// it appears in the report.
+func TestCrawl_Assets_SharedAssetIsFetchedOnlyOnce(t *testing.T) {
+	site := newFakeSite()
+	site.handle("/", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusOK, fmt.Sprintf(htmlTemplate, `
+			<a href="/other">Other</a>
+			<img src="/shared.png">
+			<img src="/shared.png">
+		`)), nil
+	})
+	site.handle("/other", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusOK, `<img src="/shared.png">`), nil
+	})
+	site.handle("/shared.png", func(r *http.Request) (*http.Response, error) {
+		return newResponseWithContentLength(http.StatusOK, "PNGDATA", 7), nil
+	})
+
+	opts := testOptions("http://fake.test/", site.client())
+	opts.Depth = 1
+
+	report, err := NewCrawler(opts).Run(context.Background())
+	require.NoError(t, err)
+	require.Len(t, report.Pages, 2)
+
+	// The duplicate <img> on the root page must not multiply into two
+	// entries; each page also references the asset exactly once.
+	for _, page := range report.Pages {
+		require.Len(t, page.Assets, 1)
+		require.Equal(t, "http://fake.test/shared.png", page.Assets[0].URL)
+		require.Equal(t, int64(7), page.Assets[0].SizeBytes)
+	}
+
+	require.Equal(t, 1, site.callCount("http://fake.test/shared.png"))
 }
 
 func TestAnalyze_ReturnsPartialReportOnContextCancellation(t *testing.T) {
