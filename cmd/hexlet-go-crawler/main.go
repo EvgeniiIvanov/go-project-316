@@ -73,10 +73,13 @@ func main() {
 			opts.IndentJSON = cmd.Bool("indent")
 
 			data, err := crawler.Analyze(ctx, opts)
-			if err != nil {
+			if data == nil {
 				return cli.Exit(fmt.Sprintf("error: %v", err), 1)
 			}
 			fmt.Print(string(data))
+			if err != nil {
+				return cli.Exit(fmt.Sprintf("error: %v", err), 1)
+			}
 			return nil
 		},
 	}
