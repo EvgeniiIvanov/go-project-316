@@ -1,0 +1,18 @@
+# .golangci.yml
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: standard
+  enable:
+    - gocyclo
+    - misspell
+    - nakedret
+    - unconvert
+  
+  settings:
+    gocyclo:
+      min-complexity: 10

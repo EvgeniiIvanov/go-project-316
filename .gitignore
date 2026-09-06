@@ -1,0 +1,14 @@
+# Go binaries
+bin/
+
+# Go test binaries
+*.test
+
+# Coverage files
+*.out
+*.html
+
+# Temporary files
+*.swp
+*.swo
+.DS_Store
