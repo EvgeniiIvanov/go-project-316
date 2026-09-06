@@ -402,6 +402,74 @@ func TestCrawl_BrokenLinks_SharedLinkIsCheckedOnlyOnce(t *testing.T) {
 	require.Equal(t, 1, site.callCount("http://cdn.test/asset.js"))
 }
 
+func TestCrawl_SEO_AllTagsPresent(t *testing.T) {
+	site := newFakeSite()
+	site.handle("/", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusOK, `<html><head>
+			<title>Example Test</title>
+			<meta name="description" content="A short description.">
+		</head><body>
+			<h1>Welcome</h1>
+		</body></html>`), nil
+	})
+
+	opts := testOptions("http://fake.test/", site.client())
+	opts.Depth = 0
+
+	report, err := NewCrawler(opts).Run(context.Background())
+	require.NoError(t, err)
+	require.Len(t, report.Pages, 1)
+
+	seo := report.Pages[0].SEO
+	require.True(t, seo.HasTitle)
+	require.Equal(t, "Example Test", seo.Title)
+	require.True(t, seo.HasDescription)
+	require.Equal(t, "A short description.", seo.Description)
+	require.True(t, seo.HasH1)
+}
+
+func TestCrawl_SEO_TagsMissing(t *testing.T) {
+	site := newFakeSite()
+	site.handle("/", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusOK, `<html><head></head><body><p>No SEO tags here.</p></body></html>`), nil
+	})
+
+	opts := testOptions("http://fake.test/", site.client())
+	opts.Depth = 0
+
+	report, err := NewCrawler(opts).Run(context.Background())
+	require.NoError(t, err)
+	require.Len(t, report.Pages, 1)
+
+	seo := report.Pages[0].SEO
+	require.False(t, seo.HasTitle)
+	require.Empty(t, seo.Title)
+	require.False(t, seo.HasDescription)
+	require.Empty(t, seo.Description)
+	require.False(t, seo.HasH1)
+}
+
+func TestCrawl_SEO_DecodesHTMLEntities(t *testing.T) {
+	site := newFakeSite()
+	site.handle("/", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusOK, `<html><head>
+			<title>Fish &amp; Chips</title>
+			<meta name="description" content="Salt &amp; vinegar included">
+		</head><body></body></html>`), nil
+	})
+
+	opts := testOptions("http://fake.test/", site.client())
+	opts.Depth = 0
+
+	report, err := NewCrawler(opts).Run(context.Background())
+	require.NoError(t, err)
+	require.Len(t, report.Pages, 1)
+
+	seo := report.Pages[0].SEO
+	require.Equal(t, "Fish & Chips", seo.Title)
+	require.Equal(t, "Salt & vinegar included", seo.Description)
+}
+
 func TestCrawl_Timeout(t *testing.T) {
 	site := newFakeSite()
 	site.handle("/", func(r *http.Request) (*http.Response, error) {

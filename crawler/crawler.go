@@ -104,6 +104,20 @@ type Page struct {
 	Status      string       `json:"status"`
 	Error       string       `json:"error"`
 	BrokenLinks []BrokenLink `json:"broken_links,omitempty"`
+	SEO         SEO          `json:"seo"`
+}
+
+// SEO holds the on-page SEO signals extracted from a page's HTML. The has_*
+// flags reflect whether the corresponding tag was found in the document at
+// all, regardless of whether its text is empty; the text fields hold the
+// decoded (entity-unescaped), trimmed content of that tag, or "" when the
+// tag was not found.
+type SEO struct {
+	HasTitle       bool   `json:"has_title"`
+	Title          string `json:"title"`
+	HasDescription bool   `json:"has_description"`
+	Description    string `json:"description"`
+	HasH1          bool   `json:"has_h1"`
 }
 
 // BrokenLink describes a link found on a page whose target could not be
@@ -291,6 +305,7 @@ func (c *Crawler) processPage(ctx context.Context, job crawlJob) (Page, []*url.U
 		return page, nil
 	}
 	page.Status = "ok"
+	page.SEO = extractSEO(body)
 
 	var links []*url.URL
 	for _, link := range dedupeLinks(extractLinks(job.url, body)) {
@@ -502,6 +517,72 @@ func extractLinks(base *url.URL, body []byte) []*url.URL {
 			resolved.Fragment = ""
 			links = append(links, resolved)
 		}
+	}
+}
+
+// extractSEO parses an HTML document and reports its on-page SEO signals:
+// the <title> text, the content of <meta name="description">, and whether
+// an <h1> is present. Only the first occurrence of each tag counts; later
+// duplicates are ignored. html.Tokenizer decodes entities for both text
+// content (Text()) and attribute values (as part of Token()), so values
+// like "Fish &amp; Chips" come out already as "Fish & Chips".
+func extractSEO(body []byte) SEO {
+	var seo SEO
+	tokenizer := html.NewTokenizer(bytes.NewReader(body))
+
+	for {
+		tt := tokenizer.Next()
+		if tt == html.ErrorToken {
+			return seo
+		}
+		if tt != html.StartTagToken && tt != html.SelfClosingTagToken {
+			continue
+		}
+
+		token := tokenizer.Token()
+		switch token.Data {
+		case "title":
+			captureTitle(tokenizer, tt, &seo)
+		case "meta":
+			captureMetaDescription(token, &seo)
+		case "h1":
+			seo.HasH1 = true
+		}
+	}
+}
+
+// captureTitle records the first <title> tag's text, if any is present as
+// the immediately following text token. It is a no-op once a title has
+// already been captured, so later duplicates are ignored.
+func captureTitle(tokenizer *html.Tokenizer, tt html.TokenType, seo *SEO) {
+	if seo.HasTitle {
+		return
+	}
+	seo.HasTitle = true
+	if tt == html.StartTagToken && tokenizer.Next() == html.TextToken {
+		seo.Title = strings.TrimSpace(string(tokenizer.Text()))
+	}
+}
+
+// captureMetaDescription records the content of the first
+// <meta name="description" content="..."> tag. It is a no-op once a
+// description has already been captured, so later duplicates are ignored.
+func captureMetaDescription(token html.Token, seo *SEO) {
+	if seo.HasDescription {
+		return
+	}
+	var name, content string
+	for _, attr := range token.Attr {
+		switch strings.ToLower(attr.Key) {
+		case "name":
+			name = strings.ToLower(strings.TrimSpace(attr.Val))
+		case "content":
+			content = attr.Val
+		}
+	}
+	if name == "description" {
+		seo.HasDescription = true
+		seo.Description = strings.TrimSpace(content)
 	}
 }
 
