@@ -470,6 +470,56 @@ func TestCrawl_SEO_DecodesHTMLEntities(t *testing.T) {
 	require.Equal(t, "Salt & vinegar included", seo.Description)
 }
 
+func TestAnalyze_ReturnsPartialReportOnContextCancellation(t *testing.T) {
+	started := make(chan struct{})
+	site := newFakeSite()
+	site.handle("/", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusOK, fmt.Sprintf(htmlTemplate, `<a href="/slow">Slow</a>`)), nil
+	})
+	site.handle("/slow", func(r *http.Request) (*http.Response, error) {
+		close(started)
+		<-r.Context().Done()
+		return nil, r.Context().Err()
+	})
+
+	opts := testOptions("http://fake.test/", site.client())
+	opts.Depth = 1
+	opts.Concurrency = 1
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		<-started
+		cancel()
+	}()
+
+	data, err := Analyze(ctx, opts)
+	require.Error(t, err)
+	require.NotNil(t, data)
+
+	var report Report
+	require.NoError(t, json.Unmarshal(data, &report))
+	require.Equal(t, "http://fake.test/", report.RootURL)
+
+	byURL := make(map[string]Page)
+	for _, p := range report.Pages {
+		byURL[p.URL] = p
+	}
+	// The root page's own fetch completed before cancellation; only its
+	// /slow link check was still in flight when ctx was canceled, so /slow
+	// never becomes its own crawled page (the worker sees ctx already done
+	// before it would enqueue it), but the root page it must still show up,
+	// with the interrupted link check recorded as broken, in a valid report
+	// rather than the whole thing being discarded because the crawl as a
+	// whole ended in an error.
+	root := byURL["http://fake.test/"]
+	require.Equal(t, "ok", root.Status)
+	require.Len(t, root.BrokenLinks, 1)
+	require.Equal(t, "http://fake.test/slow", root.BrokenLinks[0].URL)
+	require.NotEmpty(t, root.BrokenLinks[0].Error)
+}
+
 func TestCrawl_Timeout(t *testing.T) {
 	site := newFakeSite()
 	site.handle("/", func(r *http.Request) (*http.Response, error) {
