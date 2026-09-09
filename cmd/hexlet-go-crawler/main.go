@@ -35,18 +35,18 @@ var appFlags = []cli.Flag{
 		Usage: "target requests per second, global across all workers; takes priority over --delay when set (0 disables)",
 		Value: 0,
 	},
-	&cli.IntFlag{
+	&cli.DurationFlag{
 		Name:  "timeout",
-		Usage: "request timeout in seconds",
-		Value: int(crawler.DefaultTimeout.Seconds()),
+		Usage: "per-request timeout, e.g. 5s, 15s",
+		Value: crawler.DefaultTimeout,
 	},
 	&cli.StringFlag{
 		Name:  "user-agent",
-		Usage: "User-Agent header for requests",
+		Usage: "custom User-Agent header for requests",
 		Value: crawler.DefaultUserAgent,
 	},
 	&cli.IntFlag{
-		Name:  "concurrency",
+		Name:  "workers",
 		Usage: "number of concurrent workers",
 		Value: crawler.DefaultConcurrency,
 	},
@@ -116,9 +116,9 @@ func buildOptions(url string, cmd *cli.Command) crawler.Options {
 	opts.Depth = cmd.Int("depth")
 	opts.Retries = cmd.Int("retries")
 	opts.Delay = resolveDelay(cmd.Duration("delay"), cmd.Float64("rps"))
-	opts.Timeout = time.Duration(cmd.Int("timeout")) * time.Second
+	opts.Timeout = cmd.Duration("timeout")
 	opts.UserAgent = cmd.String("user-agent")
-	opts.Concurrency = cmd.Int("concurrency")
+	opts.Concurrency = cmd.Int("workers")
 	opts.IndentJSON = cmd.Bool("indent")
 	return opts
 }

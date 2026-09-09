@@ -12,12 +12,12 @@ import (
 // definitions in cmd/hexlet-go-crawler, so there is exactly one place that
 // defines what "default" means for this crawler.
 const (
-	DefaultDepth       = 2
-	DefaultRetries     = 3
-	DefaultDelay       = 1 * time.Second
-	DefaultTimeout     = 5 * time.Second
-	DefaultUserAgent   = "go-crawler/1.0"
-	DefaultConcurrency = 5
+	DefaultDepth       = 10
+	DefaultRetries     = 1
+	DefaultDelay       = 0 * time.Second
+	DefaultTimeout     = 15 * time.Second
+	DefaultUserAgent   = ""
+	DefaultConcurrency = 4
 	DefaultIndentJSON  = true
 )
 
