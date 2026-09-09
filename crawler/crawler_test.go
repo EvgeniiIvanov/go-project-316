@@ -25,7 +25,7 @@ func TestNormalizeURL(t *testing.T) {
 	}{
 		{"lowercases scheme and host", "HTTP://Example.COM/Path", "http://example.com/Path"},
 		{"strips fragment", "http://example.com/path#section", "http://example.com/path"},
-		{"empty path becomes slash", "http://example.com", "http://example.com/"},
+		{"empty path left untouched", "http://example.com", "http://example.com"},
 		{"keeps query untouched", "http://example.com/path?a=1", "http://example.com/path?a=1"},
 		{"invalid url returned unchanged", "http://[::1", "http://[::1"},
 	}

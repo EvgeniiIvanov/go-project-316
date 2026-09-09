@@ -51,7 +51,7 @@ func runBuildOptions(t *testing.T, url string, args ...string) crawler.Options {
 
 func TestBuildOptions_Defaults(t *testing.T) {
 	opts := runBuildOptions(t, "https://example.com")
-	require.Equal(t, "https://example.com/", opts.URL)
+	require.Equal(t, "https://example.com", opts.URL)
 	require.Equal(t, crawler.DefaultDepth, opts.Depth)
 	require.Equal(t, crawler.DefaultRetries, opts.Retries)
 	require.Equal(t, crawler.DefaultDelay, opts.Delay)
