@@ -61,9 +61,6 @@ func normalizeURL(rawURL string) string {
 	u.Scheme = strings.ToLower(u.Scheme)
 	u.Host = strings.ToLower(u.Host)
 	u.Fragment = ""
-	if u.Path == "" {
-		u.Path = "/"
-	}
 	return u.String()
 }
 
