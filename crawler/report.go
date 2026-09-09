@@ -12,14 +12,14 @@ type Report struct {
 
 // Page describes the outcome of fetching a single URL during the crawl.
 // Every field is always present in the JSON report, even when it holds a
-// zero value (empty string, empty array, etc): consumers should never need
-// to handle a missing key, only an empty one.
+// zero value (empty string, empty array, etc), except Error, which is
+// omitted entirely when the page was fetched successfully (Status == "ok").
 type Page struct {
 	URL          string       `json:"url"`
 	Depth        int          `json:"depth"`
 	HTTPStatus   int          `json:"http_status"`
 	Status       string       `json:"status"`
-	Error        string       `json:"error"`
+	Error        string       `json:"error,omitempty"`
 	SEO          SEO          `json:"seo"`
 	BrokenLinks  []BrokenLink `json:"broken_links"`
 	Assets       []Asset      `json:"assets"`
