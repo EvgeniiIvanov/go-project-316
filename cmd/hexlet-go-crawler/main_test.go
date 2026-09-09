@@ -59,6 +59,7 @@ func TestBuildOptions_Defaults(t *testing.T) {
 	require.Equal(t, crawler.DefaultUserAgent, opts.UserAgent)
 	require.Equal(t, crawler.DefaultConcurrency, opts.Concurrency)
 	require.Equal(t, crawler.DefaultIndentJSON, opts.IndentJSON)
+	require.False(t, opts.Debug)
 }
 
 func TestBuildOptions_DelayFlagIsUsedWhenRPSUnset(t *testing.T) {
@@ -84,6 +85,7 @@ func TestBuildOptions_AllFlagsAreMapped(t *testing.T) {
 		"--user-agent", "custom-agent/1.0",
 		"--concurrency", "3",
 		"--indent",
+		"--debug",
 	)
 	require.Equal(t, 4, opts.Depth)
 	require.Equal(t, 7, opts.Retries)
@@ -91,4 +93,5 @@ func TestBuildOptions_AllFlagsAreMapped(t *testing.T) {
 	require.Equal(t, "custom-agent/1.0", opts.UserAgent)
 	require.Equal(t, 3, opts.Concurrency)
 	require.True(t, opts.IndentJSON)
+	require.True(t, opts.Debug)
 }

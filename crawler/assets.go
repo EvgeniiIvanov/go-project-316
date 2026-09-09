@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"golang.org/x/net/html"
 )
@@ -54,12 +55,18 @@ func (c *Crawler) fetchAsset(ctx context.Context, rawURL, assetType string) Asse
 		return asset
 	}
 
+	start := time.Now()
+	var status int
+	var reqErr error
+	defer func() { c.logRequest(http.MethodGet, rawURL, start, status, reqErr) }()
+
 	reqCtx, cancel := context.WithTimeout(ctx, c.opts.Timeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		asset.Error = err.Error()
+		reqErr = err
 		return asset
 	}
 	if c.opts.UserAgent != "" {
@@ -69,14 +76,17 @@ func (c *Crawler) fetchAsset(ctx context.Context, rawURL, assetType string) Asse
 	resp, err := c.client.Do(req)
 	if err != nil {
 		asset.Error = err.Error()
+		reqErr = err
 		return asset
 	}
 	defer func() { _ = resp.Body.Close() }()
 	asset.StatusCode = resp.StatusCode
+	status = resp.StatusCode
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		asset.Error = fmt.Sprintf("failed to read response body: %v", err)
+		reqErr = err
 		return asset
 	}
 	if resp.StatusCode >= http.StatusBadRequest {

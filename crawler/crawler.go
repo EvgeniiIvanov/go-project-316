@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -114,6 +115,24 @@ func isRetryableStatus(status int, err error) bool {
 		return false
 	}
 	return err != nil
+}
+
+// logRequest writes a single line to stderr describing one HTTP attempt
+// (method, URL, start time, outcome, and duration), when opts.Debug is
+// enabled. It is a no-op otherwise, so debug logging has no effect on the
+// crawler's behavior or on the report printed to stdout.
+func (c *Crawler) logRequest(method, rawURL string, start time.Time, status int, err error) {
+	if !c.opts.Debug {
+		return
+	}
+	duration := time.Since(start)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[DEBUG] %s %s %s -> error: %v (%s)\n",
+			start.UTC().Format(time.RFC3339), method, rawURL, err, duration)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[DEBUG] %s %s %s -> %d (%s)\n",
+		start.UTC().Format(time.RFC3339), method, rawURL, status, duration)
 }
 
 func (c *Crawler) visitedOrMark(u *url.URL) bool {

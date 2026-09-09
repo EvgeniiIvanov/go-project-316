@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -1063,4 +1064,64 @@ func TestCrawl_Timeout(t *testing.T) {
 	require.Equal(t, "error", report.Pages[0].Status)
 	require.Equal(t, 0, report.Pages[0].HTTPStatus)
 	require.Contains(t, report.Pages[0].Error, "deadline exceeded")
+}
+
+// captureStderr temporarily redirects os.Stderr to a pipe for the duration
+// of fn, and returns everything written to it. It is not safe for tests
+// that run in parallel with each other, since os.Stderr is process-global.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+
+	original := os.Stderr
+	os.Stderr = w
+	defer func() { os.Stderr = original }()
+
+	fn()
+
+	require.NoError(t, w.Close())
+	out, err := io.ReadAll(r)
+	require.NoError(t, err)
+	return string(out)
+}
+
+func TestCrawl_Debug_LogsRequestsToStderr(t *testing.T) {
+	site := newFakeSite()
+	site.handle("/", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusOK, fmt.Sprintf(htmlTemplate, `<a href="/broken">broken</a>`)), nil
+	})
+	site.handle("/broken", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusNotFound, ""), nil
+	})
+
+	opts := testOptions("http://fake.test/", site.client())
+	opts.Debug = true
+
+	output := captureStderr(t, func() {
+		_, err := NewCrawler(opts).Run(context.Background())
+		require.NoError(t, err)
+	})
+
+	require.Contains(t, output, "[DEBUG]")
+	require.Contains(t, output, "GET http://fake.test/ -> 200")
+	require.Contains(t, output, "http://fake.test/broken -> 404")
+}
+
+func TestCrawl_NoDebug_LogsNothingToStderr(t *testing.T) {
+	site := newFakeSite()
+	site.handle("/", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusOK, fmt.Sprintf(htmlTemplate, "hi")), nil
+	})
+
+	opts := testOptions("http://fake.test/", site.client())
+	opts.Debug = false
+
+	output := captureStderr(t, func() {
+		_, err := NewCrawler(opts).Run(context.Background())
+		require.NoError(t, err)
+	})
+
+	require.Empty(t, output)
 }

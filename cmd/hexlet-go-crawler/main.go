@@ -55,6 +55,11 @@ var appFlags = []cli.Flag{
 		Usage: "pretty-print JSON output",
 		Value: crawler.DefaultIndentJSON,
 	},
+	&cli.BoolFlag{
+		Name:  "debug",
+		Usage: "log every HTTP request to stderr (method, URL, start time, outcome, duration)",
+		Value: false,
+	},
 }
 
 func main() {
@@ -120,5 +125,6 @@ func buildOptions(url string, cmd *cli.Command) crawler.Options {
 	opts.UserAgent = cmd.String("user-agent")
 	opts.Concurrency = cmd.Int("concurrency")
 	opts.IndentJSON = cmd.Bool("indent")
+	opts.Debug = cmd.Bool("debug")
 	return opts
 }
