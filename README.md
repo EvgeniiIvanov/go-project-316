@@ -35,13 +35,13 @@ make build
 Доступные флаги:
 
 ```
---depth int          максимальная глубина обхода, 0 значит только корневая страница (default: 2)
---retries int        количество повторов при неудачном запросе (default: 3)
---delay duration     фиксированная задержка между запросами, например 200ms, 1s (default: 1s)
+--depth int          максимальная глубина обхода, 0 значит только корневая страница (default: 10)
+--retries int        количество повторов при неудачном запросе (default: 1)
+--delay duration     фиксированная задержка между запросами, например 200ms, 1s (default: 0s)
 --rps float          целевое количество запросов в секунду; если задан (>0), имеет приоритет над --delay: CLI сам переводит его в задержку (1s/rps) перед запуском обхода (default: 0, то есть не используется)
---timeout int        таймаут запроса в секундах (default: 5)
---user-agent string  заголовок User-Agent для запросов (default: "go-crawler/1.0")
---concurrency int    количество параллельных воркеров (default: 5)
+--timeout duration   таймаут запроса, например 5s, 15s (default: 15s)
+--user-agent string  заголовок User-Agent для запросов (default: не задан)
+--workers int        количество параллельных воркеров (default: 4)
 --indent             форматировать JSON с отступами
 --debug              логировать каждый HTTP-запрос в stderr: метод, URL, время начала, результат (статус или ошибка) и длительность
 ```
@@ -66,7 +66,7 @@ make build
 Пример с настройкой глубины и количества воркеров:
 
 ```bash
-./bin/crawler --depth 3 --concurrency 10 --indent https://example.com
+./bin/crawler --depth 3 --workers 10 --indent https://example.com
 ```
 
 Пример с ограничением скорости по RPS:

@@ -81,9 +81,9 @@ func TestBuildOptions_AllFlagsAreMapped(t *testing.T) {
 	opts := runBuildOptions(t, "https://example.com",
 		"--depth", "4",
 		"--retries", "7",
-		"--timeout", "9",
+		"--timeout", "9s",
 		"--user-agent", "custom-agent/1.0",
-		"--concurrency", "3",
+		"--workers", "3",
 		"--indent",
 		"--debug",
 	)
