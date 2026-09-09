@@ -23,7 +23,6 @@ const (
 	DefaultDepth       = 2
 	DefaultRetries     = 3
 	DefaultDelay       = 1 * time.Second
-	DefaultRPS         = 0
 	DefaultTimeout     = 5 * time.Second
 	DefaultUserAgent   = "go-crawler/1.0"
 	DefaultConcurrency = 5
@@ -32,7 +31,7 @@ const (
 
 // retryBackoff is the fixed pause observed between a failed attempt and the
 // next retry of the same request. It is independent of, and in addition to,
-// any global Delay/RPS pacing: it exists so that retries of one request
+// any global Delay pacing: it exists so that retries of one request
 // never fire back-to-back in a burst, even when no global rate limit is
 // configured.
 const retryBackoff = 100 * time.Millisecond
@@ -42,7 +41,6 @@ type Options struct {
 	Depth       int
 	Retries     int
 	Delay       time.Duration
-	RPS         int
 	Timeout     time.Duration
 	UserAgent   string
 	Concurrency int
@@ -56,7 +54,6 @@ func NewOptions(rawURL string) Options {
 		Depth:       DefaultDepth,
 		Retries:     DefaultRetries,
 		Delay:       DefaultDelay,
-		RPS:         DefaultRPS,
 		Timeout:     DefaultTimeout,
 		UserAgent:   DefaultUserAgent,
 		Concurrency: DefaultConcurrency,
@@ -95,21 +92,15 @@ func (o Options) Validate() error {
 	if o.Depth < 0 {
 		return errors.New("depth cannot be negative")
 	}
-	if o.RPS < 0 {
-		return errors.New("rps cannot be negative")
-	}
 	return nil
 }
 
 // interval returns the minimum spacing that must be observed between
-// consecutive HTTP requests across the whole crawl. RPS, when set, takes
-// priority over Delay: a positive RPS is converted into 1s/RPS. Delay is
-// used as-is otherwise, including when both are zero, which means no
-// throttling at all.
+// consecutive HTTP requests across the whole crawl. Delay is used as-is,
+// including when it is zero, which means no throttling at all. Converting
+// a target requests-per-second rate into Delay (1s/RPS) is the caller's
+// responsibility, e.g. the CLI does this before constructing Options.
 func (o Options) interval() time.Duration {
-	if o.RPS > 0 {
-		return time.Second / time.Duration(o.RPS)
-	}
 	return o.Delay
 }
 
