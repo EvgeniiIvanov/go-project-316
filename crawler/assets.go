@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -175,8 +176,12 @@ func resolveAssetAttr(base *url.URL, token html.Token, attrKey, assetType string
 }
 
 // dedupeAssetRefs removes repeated asset references (e.g. the same script
-// included twice on one page), preserving first-seen order, so a page's
-// asset list never contains the same URL more than once.
+// included twice on one page), so a page's asset list never contains the
+// same URL more than once. The result is then sorted by (type, URL) so
+// that a page's asset order is deterministic and independent of where in
+// the HTML document each tag happened to appear (e.g. a <link rel=
+// "stylesheet"> in <head> no longer sorts before <img>/<script> tags
+// later in <body> just because it was parsed first).
 func dedupeAssetRefs(refs []assetRef) []assetRef {
 	seen := make(map[string]struct{}, len(refs))
 	unique := refs[:0]
@@ -188,5 +193,11 @@ func dedupeAssetRefs(refs []assetRef) []assetRef {
 		seen[key] = struct{}{}
 		unique = append(unique, ref)
 	}
+	sort.Slice(unique, func(i, j int) bool {
+		if unique[i].typ != unique[j].typ {
+			return unique[i].typ < unique[j].typ
+		}
+		return unique[i].url.String() < unique[j].url.String()
+	})
 	return unique
 }
