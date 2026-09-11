@@ -37,6 +37,7 @@ type Options struct {
 	UserAgent   string
 	Concurrency int
 	IndentJSON  bool
+	Debug       bool
 	HTTPClient  *http.Client
 }
 

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -116,8 +118,45 @@ func isRetryableStatus(status int, err error) bool {
 	return err != nil
 }
 
-func (c *Crawler) visitedOrMark(u *url.URL) bool {
+// logRequest writes a single line to stderr describing one HTTP attempt
+// (method, URL, start time, outcome, and duration), when opts.Debug is
+// enabled. It is a no-op otherwise, so debug logging has no effect on the
+// crawler's behavior or on the report printed to stdout.
+func (c *Crawler) logRequest(method, rawURL string, start time.Time, status int, err error) {
+	if !c.opts.Debug {
+		return
+	}
+	duration := time.Since(start)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[DEBUG] %s %s %s -> error: %v (%s)\n",
+			start.UTC().Format(time.RFC3339), method, rawURL, err, duration)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[DEBUG] %s %s %s -> %d (%s)\n",
+		start.UTC().Format(time.RFC3339), method, rawURL, status, duration)
+}
+
+// dedupeKey returns the string used to decide whether two URLs refer to the
+// same page for crawl-visitation purposes. It is deliberately more
+// aggressive than normalizeURL: an empty path and "/" are treated as the
+// same page (e.g. "http://example.com" and "http://example.com/"), so a
+// root URL given without a trailing slash doesn't get crawled twice under
+// two different-looking URLs. This canonicalization is only used to decide
+// what to crawl; it never changes the URL string stored in the report.
+func dedupeKey(u *url.URL) string {
 	key := normalizeURL(u.String())
+	parsed, err := url.Parse(key)
+	if err != nil {
+		return key
+	}
+	if parsed.Path == "" {
+		parsed.Path = "/"
+	}
+	return parsed.String()
+}
+
+func (c *Crawler) visitedOrMark(u *url.URL) bool {
+	key := dedupeKey(u)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if _, ok := c.visited[key]; ok {
@@ -165,6 +204,19 @@ func (c *Crawler) Run(ctx context.Context) (*Report, error) {
 	run.pending.Wait()
 	close(run.jobs)
 
+	// Workers append pages as they finish fetching, and concurrent workers
+	// can finish in a different order than they started, so without this
+	// the page order in the report would be nondeterministic across runs
+	// even for an identical site. Sorting by (depth, URL) gives a stable,
+	// reproducible order: pages are grouped by crawl depth (root first),
+	// and same-depth pages are ordered alphabetically by URL.
+	sort.Slice(report.Pages, func(i, j int) bool {
+		if report.Pages[i].Depth != report.Pages[j].Depth {
+			return report.Pages[i].Depth < report.Pages[j].Depth
+		}
+		return report.Pages[i].URL < report.Pages[j].URL
+	})
+
 	return report, ctx.Err()
 }
 
@@ -192,7 +244,12 @@ func (c *Crawler) worker(ctx context.Context, run *crawlRun) {
 		run.report.Pages = append(run.report.Pages, page)
 		run.pagesMu.Unlock()
 
-		if ctx.Err() == nil && job.depth+1 <= c.opts.Depth {
+		// opts.Depth counts how many page levels to crawl: Depth=1 means
+		// "root only, follow no links", Depth=2 means "root plus its
+		// direct links", and so on. job.depth is the zero-indexed depth
+		// of the page just processed, so a child at job.depth+1 is only
+		// within bounds when that index is strictly less than opts.Depth.
+		if ctx.Err() == nil && job.depth+1 < c.opts.Depth {
 			for _, link := range links {
 				if c.visitedOrMark(link) {
 					run.enqueue(ctx, crawlJob{url: link, depth: job.depth + 1})
@@ -219,19 +276,23 @@ func (c *Crawler) processPage(ctx context.Context, job crawlJob) (Page, []*url.U
 		URL:          job.url.String(),
 		Depth:        job.depth,
 		DiscoveredAt: time.Now().UTC().Truncate(time.Second),
-		BrokenLinks:  []BrokenLink{},
-		Assets:       []Asset{},
 	}
 
 	body, status, err := c.fetch(ctx, job.url.String())
 	page.HTTPStatus = status
 	if err != nil {
+		// On a failed fetch there is no HTML to derive links or assets
+		// from, so BrokenLinks/Assets are left nil (JSON null) rather
+		// than the empty-slice "[]" used for a page that was fetched
+		// successfully but simply has none.
 		page.Status = "error"
 		page.Error = err.Error()
 		return page, nil
 	}
 	page.Status = "ok"
 	page.SEO = extractSEO(body)
+	page.BrokenLinks = []BrokenLink{}
+	page.Assets = []Asset{}
 
 	var links []*url.URL
 	for _, link := range dedupeLinks(extractLinks(job.url, body)) {

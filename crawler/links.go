@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"golang.org/x/net/html"
 )
@@ -119,7 +120,10 @@ func (c *Crawler) probe(ctx context.Context, rawURL string) (int, error) {
 	return status, nil
 }
 
-func (c *Crawler) doProbeRequest(ctx context.Context, method, rawURL string) (int, error) {
+func (c *Crawler) doProbeRequest(ctx context.Context, method, rawURL string) (status int, err error) {
+	start := time.Now()
+	defer func() { c.logRequest(method, rawURL, start, status, err) }()
+
 	req, err := http.NewRequestWithContext(ctx, method, rawURL, nil)
 	if err != nil {
 		return 0, err

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 )
 
 // fetch performs a GET for rawURL, retrying up to opts.Retries additional
@@ -32,7 +33,10 @@ func (c *Crawler) fetch(ctx context.Context, rawURL string) ([]byte, int, error)
 }
 
 // doRequest performs a single GET attempt for rawURL.
-func (c *Crawler) doRequest(ctx context.Context, rawURL string) ([]byte, int, error) {
+func (c *Crawler) doRequest(ctx context.Context, rawURL string) (body []byte, status int, err error) {
+	start := time.Now()
+	defer func() { c.logRequest(http.MethodGet, rawURL, start, status, err) }()
+
 	reqCtx, cancel := context.WithTimeout(ctx, c.opts.Timeout)
 	defer cancel()
 
@@ -50,7 +54,7 @@ func (c *Crawler) doRequest(ctx context.Context, rawURL string) ([]byte, int, er
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err = io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, resp.StatusCode, err
 	}

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -101,8 +102,7 @@ const referenceReportJSON = `{
           "url": "https://example.com/static/logo.png",
           "type": "image",
           "status_code": 200,
-          "size_bytes": 12345,
-          "error": ""
+          "size_bytes": 12345
         }
       ],
       "discovered_at": "2024-06-01T12:34:56Z"
@@ -155,9 +155,10 @@ func compactJSON(t *testing.T, data []byte) string {
 
 // TestReport_JSONMatchesReferenceSchema compares the library's JSON output,
 // byte-for-byte after whitespace normalization, against Hexlet's reference
-// report: every key, its position, and its value (including empty strings
-// like Asset/BrokenLink's "error": "") must match exactly. Page.Error is
-// omitted entirely when empty (see Page's omitempty tag).
+// report: every key, its position, and its value must match exactly.
+// Page.Error and Asset.Error are both omitted entirely when empty (see
+// their omitempty tags); BrokenLink.Error stays mandatory since exactly one
+// of BrokenLink.StatusCode/Error is always meaningful.
 func TestReport_JSONMatchesReferenceSchema(t *testing.T) {
 	report := referenceReport()
 	want := compactJSON(t, []byte(referenceReportJSON))
@@ -287,7 +288,7 @@ func TestAnalyze_CrawlsSameHostOnly(t *testing.T) {
 	})
 
 	opts := testOptions("http://fake.test/", site.client())
-	opts.Depth = 1
+	opts.Depth = 2 // root, plus its direct links
 
 	data, err := Analyze(context.Background(), opts)
 	require.NoError(t, err)
@@ -349,7 +350,7 @@ func TestRun_DedupesRepeatedLinks(t *testing.T) {
 	})
 
 	opts := testOptions("http://fake.test/", site.client())
-	opts.Depth = 1
+	opts.Depth = 2 // root, plus its direct links
 
 	report, err := NewCrawler(opts).Run(context.Background())
 	require.NoError(t, err)
@@ -629,7 +630,7 @@ func TestCrawl_BrokenLinks_SharedLinkIsCheckedOnlyOnce(t *testing.T) {
 	})
 
 	opts := testOptions("http://fake.test/", site.client())
-	opts.Depth = 1
+	opts.Depth = 2 // root, plus its direct links (so /page-a is crawled too)
 
 	report, err := NewCrawler(opts).Run(context.Background())
 	require.NoError(t, err)
@@ -856,7 +857,7 @@ func TestCrawl_Assets_SharedAssetIsFetchedOnlyOnce(t *testing.T) {
 	})
 
 	opts := testOptions("http://fake.test/", site.client())
-	opts.Depth = 1
+	opts.Depth = 2 // root, plus its direct links
 
 	report, err := NewCrawler(opts).Run(context.Background())
 	require.NoError(t, err)
@@ -886,7 +887,7 @@ func TestAnalyze_ReturnsPartialReportOnContextCancellation(t *testing.T) {
 	})
 
 	opts := testOptions("http://fake.test/", site.client())
-	opts.Depth = 1
+	opts.Depth = 2 // root, plus its direct links (so /slow is reachable)
 	opts.Concurrency = 1
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -968,7 +969,7 @@ func TestCrawl_DelayThrottlesRequestsGlobally(t *testing.T) {
 	}
 
 	opts := testOptions("http://fake.test/", site.client())
-	opts.Depth = 1
+	opts.Depth = 2 // root, plus its direct links
 	opts.Concurrency = n
 	opts.Delay = 40 * time.Millisecond
 
@@ -1001,7 +1002,7 @@ func TestCrawl_NoLimitIsNotArtificiallySlowed(t *testing.T) {
 	}
 
 	opts := testOptions("http://fake.test/", site.client())
-	opts.Depth = 1
+	opts.Depth = 2 // root, plus its direct links
 	opts.Concurrency = n
 	opts.Delay = 0
 
@@ -1063,4 +1064,64 @@ func TestCrawl_Timeout(t *testing.T) {
 	require.Equal(t, "error", report.Pages[0].Status)
 	require.Equal(t, 0, report.Pages[0].HTTPStatus)
 	require.Contains(t, report.Pages[0].Error, "deadline exceeded")
+}
+
+// captureStderr temporarily redirects os.Stderr to a pipe for the duration
+// of fn, and returns everything written to it. It is not safe for tests
+// that run in parallel with each other, since os.Stderr is process-global.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+
+	original := os.Stderr
+	os.Stderr = w
+	defer func() { os.Stderr = original }()
+
+	fn()
+
+	require.NoError(t, w.Close())
+	out, err := io.ReadAll(r)
+	require.NoError(t, err)
+	return string(out)
+}
+
+func TestCrawl_Debug_LogsRequestsToStderr(t *testing.T) {
+	site := newFakeSite()
+	site.handle("/", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusOK, fmt.Sprintf(htmlTemplate, `<a href="/broken">broken</a>`)), nil
+	})
+	site.handle("/broken", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusNotFound, ""), nil
+	})
+
+	opts := testOptions("http://fake.test/", site.client())
+	opts.Debug = true
+
+	output := captureStderr(t, func() {
+		_, err := NewCrawler(opts).Run(context.Background())
+		require.NoError(t, err)
+	})
+
+	require.Contains(t, output, "[DEBUG]")
+	require.Contains(t, output, "GET http://fake.test/ -> 200")
+	require.Contains(t, output, "http://fake.test/broken -> 404")
+}
+
+func TestCrawl_NoDebug_LogsNothingToStderr(t *testing.T) {
+	site := newFakeSite()
+	site.handle("/", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusOK, fmt.Sprintf(htmlTemplate, "hi")), nil
+	})
+
+	opts := testOptions("http://fake.test/", site.client())
+	opts.Debug = false
+
+	output := captureStderr(t, func() {
+		_, err := NewCrawler(opts).Run(context.Background())
+		require.NoError(t, err)
+	})
+
+	require.Empty(t, output)
 }
