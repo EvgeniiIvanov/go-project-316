@@ -271,19 +271,23 @@ func (c *Crawler) processPage(ctx context.Context, job crawlJob) (Page, []*url.U
 		URL:          job.url.String(),
 		Depth:        job.depth,
 		DiscoveredAt: time.Now().UTC().Truncate(time.Second),
-		BrokenLinks:  []BrokenLink{},
-		Assets:       []Asset{},
 	}
 
 	body, status, err := c.fetch(ctx, job.url.String())
 	page.HTTPStatus = status
 	if err != nil {
+		// On a failed fetch there is no HTML to derive links or assets
+		// from, so BrokenLinks/Assets are left nil (JSON null) rather
+		// than the empty-slice "[]" used for a page that was fetched
+		// successfully but simply has none.
 		page.Status = "error"
 		page.Error = err.Error()
 		return page, nil
 	}
 	page.Status = "ok"
 	page.SEO = extractSEO(body)
+	page.BrokenLinks = []BrokenLink{}
+	page.Assets = []Asset{}
 
 	var links []*url.URL
 	for _, link := range dedupeLinks(extractLinks(job.url, body)) {
