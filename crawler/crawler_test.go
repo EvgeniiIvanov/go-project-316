@@ -102,8 +102,7 @@ const referenceReportJSON = `{
           "url": "https://example.com/static/logo.png",
           "type": "image",
           "status_code": 200,
-          "size_bytes": 12345,
-          "error": ""
+          "size_bytes": 12345
         }
       ],
       "discovered_at": "2024-06-01T12:34:56Z"
@@ -156,9 +155,10 @@ func compactJSON(t *testing.T, data []byte) string {
 
 // TestReport_JSONMatchesReferenceSchema compares the library's JSON output,
 // byte-for-byte after whitespace normalization, against Hexlet's reference
-// report: every key, its position, and its value (including empty strings
-// like Asset/BrokenLink's "error": "") must match exactly. Page.Error is
-// omitted entirely when empty (see Page's omitempty tag).
+// report: every key, its position, and its value must match exactly.
+// Page.Error and Asset.Error are both omitted entirely when empty (see
+// their omitempty tags); BrokenLink.Error stays mandatory since exactly one
+// of BrokenLink.StatusCode/Error is always meaningful.
 func TestReport_JSONMatchesReferenceSchema(t *testing.T) {
 	report := referenceReport()
 	want := compactJSON(t, []byte(referenceReportJSON))

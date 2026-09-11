@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -135,8 +136,27 @@ func (c *Crawler) logRequest(method, rawURL string, start time.Time, status int,
 		start.UTC().Format(time.RFC3339), method, rawURL, status, duration)
 }
 
-func (c *Crawler) visitedOrMark(u *url.URL) bool {
+// dedupeKey returns the string used to decide whether two URLs refer to the
+// same page for crawl-visitation purposes. It is deliberately more
+// aggressive than normalizeURL: an empty path and "/" are treated as the
+// same page (e.g. "http://example.com" and "http://example.com/"), so a
+// root URL given without a trailing slash doesn't get crawled twice under
+// two different-looking URLs. This canonicalization is only used to decide
+// what to crawl; it never changes the URL string stored in the report.
+func dedupeKey(u *url.URL) string {
 	key := normalizeURL(u.String())
+	parsed, err := url.Parse(key)
+	if err != nil {
+		return key
+	}
+	if parsed.Path == "" {
+		parsed.Path = "/"
+	}
+	return parsed.String()
+}
+
+func (c *Crawler) visitedOrMark(u *url.URL) bool {
+	key := dedupeKey(u)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if _, ok := c.visited[key]; ok {
@@ -183,6 +203,19 @@ func (c *Crawler) Run(ctx context.Context) (*Report, error) {
 
 	run.pending.Wait()
 	close(run.jobs)
+
+	// Workers append pages as they finish fetching, and concurrent workers
+	// can finish in a different order than they started, so without this
+	// the page order in the report would be nondeterministic across runs
+	// even for an identical site. Sorting by (depth, URL) gives a stable,
+	// reproducible order: pages are grouped by crawl depth (root first),
+	// and same-depth pages are ordered alphabetically by URL.
+	sort.Slice(report.Pages, func(i, j int) bool {
+		if report.Pages[i].Depth != report.Pages[j].Depth {
+			return report.Pages[i].Depth < report.Pages[j].Depth
+		}
+		return report.Pages[i].URL < report.Pages[j].URL
+	})
 
 	return report, ctx.Err()
 }

@@ -28,15 +28,14 @@ type Page struct {
 
 // Asset describes a single static resource (image, script, or stylesheet)
 // referenced by a page. Exactly one of a successful (StatusCode < 400,
-// Error == "") or failed (Error != "") outcome applies; all fields are
-// always present in the JSON report, even on failure, so consumers never
-// need to special-case a missing field.
+// Error == "") or failed (Error != "") outcome applies. Error is omitted
+// entirely from the JSON when the asset was fetched successfully.
 type Asset struct {
 	URL        string `json:"url"`
 	Type       string `json:"type"`
 	StatusCode int    `json:"status_code"`
 	SizeBytes  int64  `json:"size_bytes"`
-	Error      string `json:"error"`
+	Error      string `json:"error,omitempty"`
 }
 
 // Asset type values recognized in the report.
