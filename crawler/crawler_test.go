@@ -288,7 +288,7 @@ func TestAnalyze_CrawlsSameHostOnly(t *testing.T) {
 	})
 
 	opts := testOptions("http://fake.test/", site.client())
-	opts.Depth = 1
+	opts.Depth = 2 // root, plus its direct links
 
 	data, err := Analyze(context.Background(), opts)
 	require.NoError(t, err)
@@ -350,7 +350,7 @@ func TestRun_DedupesRepeatedLinks(t *testing.T) {
 	})
 
 	opts := testOptions("http://fake.test/", site.client())
-	opts.Depth = 1
+	opts.Depth = 2 // root, plus its direct links
 
 	report, err := NewCrawler(opts).Run(context.Background())
 	require.NoError(t, err)
@@ -630,7 +630,7 @@ func TestCrawl_BrokenLinks_SharedLinkIsCheckedOnlyOnce(t *testing.T) {
 	})
 
 	opts := testOptions("http://fake.test/", site.client())
-	opts.Depth = 1
+	opts.Depth = 2 // root, plus its direct links (so /page-a is crawled too)
 
 	report, err := NewCrawler(opts).Run(context.Background())
 	require.NoError(t, err)
@@ -857,7 +857,7 @@ func TestCrawl_Assets_SharedAssetIsFetchedOnlyOnce(t *testing.T) {
 	})
 
 	opts := testOptions("http://fake.test/", site.client())
-	opts.Depth = 1
+	opts.Depth = 2 // root, plus its direct links
 
 	report, err := NewCrawler(opts).Run(context.Background())
 	require.NoError(t, err)
@@ -887,7 +887,7 @@ func TestAnalyze_ReturnsPartialReportOnContextCancellation(t *testing.T) {
 	})
 
 	opts := testOptions("http://fake.test/", site.client())
-	opts.Depth = 1
+	opts.Depth = 2 // root, plus its direct links (so /slow is reachable)
 	opts.Concurrency = 1
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -969,7 +969,7 @@ func TestCrawl_DelayThrottlesRequestsGlobally(t *testing.T) {
 	}
 
 	opts := testOptions("http://fake.test/", site.client())
-	opts.Depth = 1
+	opts.Depth = 2 // root, plus its direct links
 	opts.Concurrency = n
 	opts.Delay = 40 * time.Millisecond
 
@@ -1002,7 +1002,7 @@ func TestCrawl_NoLimitIsNotArtificiallySlowed(t *testing.T) {
 	}
 
 	opts := testOptions("http://fake.test/", site.client())
-	opts.Depth = 1
+	opts.Depth = 2 // root, plus its direct links
 	opts.Concurrency = n
 	opts.Delay = 0
 

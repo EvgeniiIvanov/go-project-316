@@ -244,7 +244,12 @@ func (c *Crawler) worker(ctx context.Context, run *crawlRun) {
 		run.report.Pages = append(run.report.Pages, page)
 		run.pagesMu.Unlock()
 
-		if ctx.Err() == nil && job.depth+1 <= c.opts.Depth {
+		// opts.Depth counts how many page levels to crawl: Depth=1 means
+		// "root only, follow no links", Depth=2 means "root plus its
+		// direct links", and so on. job.depth is the zero-indexed depth
+		// of the page just processed, so a child at job.depth+1 is only
+		// within bounds when that index is strictly less than opts.Depth.
+		if ctx.Err() == nil && job.depth+1 < c.opts.Depth {
 			for _, link := range links {
 				if c.visitedOrMark(link) {
 					run.enqueue(ctx, crawlJob{url: link, depth: job.depth + 1})
