@@ -21,7 +21,7 @@ func TestOptionsValidate(t *testing.T) {
 		opts    Options
 		wantErr string
 	}{
-		{"valid options", Options{URL: "http://x", Concurrency: 1, Depth: 0}, ""},
+		{"valid options, depth zero means unlimited", Options{URL: "http://x", Concurrency: 1, Depth: 0}, ""},
 		{"missing url", Options{URL: "", Concurrency: 1}, "URL is required"},
 		{"zero concurrency", Options{URL: "http://x", Concurrency: 0}, "concurrency must be at least 1"},
 		{"negative depth", Options{URL: "http://x", Concurrency: 1, Depth: -1}, "depth cannot be negative"},
@@ -270,14 +270,14 @@ func TestAnalyze_CrawlsSameHostOnly(t *testing.T) {
 	require.NotContains(t, byURL, "http://external.test/")
 }
 
-func TestAnalyze_DepthZeroFetchesOnlyRoot(t *testing.T) {
+func TestAnalyze_DepthOneFetchesOnlyRoot(t *testing.T) {
 	site := newFakeSite()
 	site.handle("/", func(r *http.Request) (*http.Response, error) {
 		return newResponse(http.StatusOK, fmt.Sprintf(htmlTemplate, `<a href="/about">About</a>`)), nil
 	})
 
 	opts := testOptions("http://fake.test/", site.client())
-	opts.Depth = 0
+	opts.Depth = 1
 
 	data, err := Analyze(context.Background(), opts)
 	require.NoError(t, err)
@@ -289,6 +289,38 @@ func TestAnalyze_DepthZeroFetchesOnlyRoot(t *testing.T) {
 	// /about is never crawled as its own page (depth exceeded), but it is
 	// still probed once to check whether it is a broken link.
 	require.Equal(t, 1, site.callCount("http://fake.test/about"))
+}
+
+// TestAnalyze_DepthZeroIsUnlimited ensures the public Analyze entry point
+// exposes the same Depth=0 "no limit" special case as the underlying
+// engine, following links regardless of how deep the site goes.
+func TestAnalyze_DepthZeroIsUnlimited(t *testing.T) {
+	site := newFakeSite()
+	site.handle("/", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusOK, fmt.Sprintf(htmlTemplate, `<a href="/about">About</a>`)), nil
+	})
+	site.handle("/about", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusOK, fmt.Sprintf(htmlTemplate, `<a href="/team">Team</a>`)), nil
+	})
+	site.handle("/team", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusOK, "team page"), nil
+	})
+
+	opts := testOptions("http://fake.test/", site.client())
+	opts.Depth = 0
+
+	data, err := Analyze(context.Background(), opts)
+	require.NoError(t, err)
+
+	var report Report
+	require.NoError(t, json.Unmarshal(data, &report))
+	require.Len(t, report.Pages, 3)
+
+	byURL := make(map[string]Page)
+	for _, p := range report.Pages {
+		byURL[p.URL] = p
+	}
+	require.Contains(t, byURL, "http://fake.test/team")
 }
 
 func TestAnalyze_ReturnsPartialReportOnContextCancellation(t *testing.T) {

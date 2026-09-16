@@ -17,7 +17,7 @@ import (
 var appFlags = []cli.Flag{
 	&cli.IntFlag{
 		Name:  "depth",
-		Usage: "maximum crawling depth, 0 means only the root page",
+		Usage: "maximum crawling depth, 1 means only the root page; 0 means no limit (use with caution on large sites)",
 		Value: crawler.DefaultDepth,
 	},
 	&cli.IntFlag{

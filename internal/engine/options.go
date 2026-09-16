@@ -29,7 +29,13 @@ const (
 const retryBackoff = 100 * time.Millisecond
 
 type Options struct {
-	URL         string
+	URL string
+	// Depth caps how many page levels are crawled starting from the root:
+	// 1 means "root only", 2 means "root plus its direct links", and so
+	// on. As a special case, 0 means no limit at all (every discovered
+	// same-host page is crawled, however deep). 0 is opt-in only; the
+	// default is DefaultDepth, not 0, and enabling it can make a crawl
+	// run for a very long time on a large site.
 	Depth       int
 	Retries     int
 	Delay       time.Duration

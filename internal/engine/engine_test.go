@@ -293,7 +293,7 @@ func TestCrawl_BrokenLink_ReflectsLastAttemptResult(t *testing.T) {
 
 	opts := testOptions("http://fake.test/", site.client())
 	opts.Retries = 2
-	opts.Depth = 0 // keep /flaky as a checked link only, not a crawled page
+	opts.Depth = 1 // keep /flaky as a checked link only, not a crawled page
 
 	report, err := NewCrawler(opts).Run(context.Background())
 	require.NoError(t, err)
@@ -334,7 +334,7 @@ func TestCrawl_BrokenLinks_OnlyBrokenOnesAreReported(t *testing.T) {
 	})
 
 	opts := testOptions("http://fake.test/", site.client())
-	opts.Depth = 0 // only check links on the root page, do not crawl them
+	opts.Depth = 1 // only check links on the root page, do not crawl them
 
 	report, err := NewCrawler(opts).Run(context.Background())
 	require.NoError(t, err)
@@ -386,12 +386,45 @@ func TestCrawl_BrokenLinks_IgnoresUnsupportedSchemesAndEmptyHrefs(t *testing.T) 
 	})
 
 	opts := testOptions("http://fake.test/", site.client())
-	opts.Depth = 0
+	opts.Depth = 1
 
 	report, err := NewCrawler(opts).Run(context.Background())
 	require.NoError(t, err)
 	require.Len(t, report.Pages, 1)
 	require.Empty(t, report.Pages[0].BrokenLinks)
+}
+
+// TestCrawl_DepthZeroMeansNoLimit ensures the special-cased Depth=0 crawls
+// every discovered same-host page regardless of how deep it is, unlike any
+// positive Depth value which caps how many levels are followed.
+func TestCrawl_DepthZeroMeansNoLimit(t *testing.T) {
+	site := newFakeSite()
+	site.handle("/", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusOK, fmt.Sprintf(htmlTemplate, `<a href="/level1">1</a>`)), nil
+	})
+	site.handle("/level1", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusOK, fmt.Sprintf(htmlTemplate, `<a href="/level2">2</a>`)), nil
+	})
+	site.handle("/level2", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusOK, fmt.Sprintf(htmlTemplate, `<a href="/level3">3</a>`)), nil
+	})
+	site.handle("/level3", func(r *http.Request) (*http.Response, error) {
+		return newResponse(http.StatusOK, "leaf"), nil
+	})
+
+	opts := testOptions("http://fake.test/", site.client())
+	opts.Depth = 0
+
+	report, err := NewCrawler(opts).Run(context.Background())
+	require.NoError(t, err)
+	require.Len(t, report.Pages, 4)
+
+	byURL := make(map[string]Page)
+	for _, p := range report.Pages {
+		byURL[p.URL] = p
+	}
+	require.Contains(t, byURL, "http://fake.test/level3")
+	require.Equal(t, 3, byURL["http://fake.test/level3"].Depth)
 }
 
 func TestCrawl_BrokenLinks_UsesHeadAndFallsBackToGet(t *testing.T) {
@@ -407,7 +440,7 @@ func TestCrawl_BrokenLinks_UsesHeadAndFallsBackToGet(t *testing.T) {
 	})
 
 	opts := testOptions("http://fake.test/", site.client())
-	opts.Depth = 0
+	opts.Depth = 1
 
 	report, err := NewCrawler(opts).Run(context.Background())
 	require.NoError(t, err)
@@ -462,7 +495,7 @@ func TestCrawl_SEO_AllTagsPresent(t *testing.T) {
 	})
 
 	opts := testOptions("http://fake.test/", site.client())
-	opts.Depth = 0
+	opts.Depth = 1
 
 	report, err := NewCrawler(opts).Run(context.Background())
 	require.NoError(t, err)
@@ -483,7 +516,7 @@ func TestCrawl_SEO_TagsMissing(t *testing.T) {
 	})
 
 	opts := testOptions("http://fake.test/", site.client())
-	opts.Depth = 0
+	opts.Depth = 1
 
 	report, err := NewCrawler(opts).Run(context.Background())
 	require.NoError(t, err)
@@ -507,7 +540,7 @@ func TestCrawl_SEO_DecodesHTMLEntities(t *testing.T) {
 	})
 
 	opts := testOptions("http://fake.test/", site.client())
-	opts.Depth = 0
+	opts.Depth = 1
 
 	report, err := NewCrawler(opts).Run(context.Background())
 	require.NoError(t, err)
@@ -539,7 +572,7 @@ func TestCrawl_Assets_ImageScriptAndStyleAreReported(t *testing.T) {
 	})
 
 	opts := testOptions("http://fake.test/", site.client())
-	opts.Depth = 0
+	opts.Depth = 1
 
 	report, err := NewCrawler(opts).Run(context.Background())
 	require.NoError(t, err)
@@ -580,7 +613,7 @@ func TestCrawl_Assets_MissingContentLengthFallsBackToBodySize(t *testing.T) {
 	})
 
 	opts := testOptions("http://fake.test/", site.client())
-	opts.Depth = 0
+	opts.Depth = 1
 
 	report, err := NewCrawler(opts).Run(context.Background())
 	require.NoError(t, err)
@@ -602,7 +635,7 @@ func TestCrawl_Assets_ErrorStatusIsReportedWithMessage(t *testing.T) {
 	})
 
 	opts := testOptions("http://fake.test/", site.client())
-	opts.Depth = 0
+	opts.Depth = 1
 
 	report, err := NewCrawler(opts).Run(context.Background())
 	require.NoError(t, err)
@@ -625,7 +658,7 @@ func TestCrawl_Assets_NetworkFailureIsReported(t *testing.T) {
 	})
 
 	opts := testOptions("http://fake.test/", site.client())
-	opts.Depth = 0
+	opts.Depth = 1
 
 	report, err := NewCrawler(opts).Run(context.Background())
 	require.NoError(t, err)
