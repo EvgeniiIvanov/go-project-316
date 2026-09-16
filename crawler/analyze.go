@@ -3,6 +3,8 @@ package crawler
 import (
 	"context"
 	"encoding/json"
+
+	"code/internal/engine"
 )
 
 // Analyze runs a full crawl for opts and returns the resulting Report
@@ -18,7 +20,7 @@ func Analyze(ctx context.Context, opts Options) ([]byte, error) {
 		return nil, err
 	}
 
-	report, runErr := NewCrawler(opts).Run(ctx)
+	report, runErr := engine.NewCrawler(opts).Run(ctx)
 	if report == nil {
 		return nil, runErr
 	}

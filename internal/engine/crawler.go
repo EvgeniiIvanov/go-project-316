@@ -1,4 +1,4 @@
-package crawler
+package engine
 
 import (
 	"context"
@@ -249,7 +249,11 @@ func (c *Crawler) worker(ctx context.Context, run *crawlRun) {
 		// direct links", and so on. job.depth is the zero-indexed depth
 		// of the page just processed, so a child at job.depth+1 is only
 		// within bounds when that index is strictly less than opts.Depth.
-		if ctx.Err() == nil && job.depth+1 < c.opts.Depth {
+		// Depth=0 is a special case meaning "no limit at all": every
+		// discovered same-host link is enqueued regardless of depth. This
+		// is opt-in only (the default is DefaultDepth, not 0) and can make
+		// a crawl run for a very long time on a large site.
+		if ctx.Err() == nil && (c.opts.Depth == 0 || job.depth+1 < c.opts.Depth) {
 			for _, link := range links {
 				if c.visitedOrMark(link) {
 					run.enqueue(ctx, crawlJob{url: link, depth: job.depth + 1})
